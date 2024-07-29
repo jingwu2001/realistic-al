@@ -158,7 +158,7 @@ def get_grad_embedding(
     start_index = 0
     assert hasattr(model, "model")  # model requires sub class model (due to code)
     assert hasattr(
-        model.model, "classifer"
+        model.model, "classifier"
     )  # model.model requires classification head (due to code).
     for i, (x, y) in enumerate(dataloader):
         inputs = x.to(device)
