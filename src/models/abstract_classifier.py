@@ -34,9 +34,10 @@ class AbstractClassifier(pl.LightningModule):
         self.ema_model = None
         self.eman = eman
 
-        self.acc_train = Accuracy()
-        self.acc_val = Accuracy()
-        self.acc_test = Accuracy()
+        # Metrics are initialized later once num_classes is known.
+        self.acc_train = None
+        self.acc_val = None
+        self.acc_test = None
 
         self.loss_fct = nn.NLLLoss()
 
@@ -288,6 +289,17 @@ class AbstractClassifier(pl.LightningModule):
                 dtype=torch.float,
             )
             self.loss_fct = nn.NLLLoss(weight=class_weights)
+
+        # Lazily initialize metrics once num_classes is available.
+        if self.acc_train is None:
+            num_classes = getattr(dm, "num_classes", None)
+            if num_classes is None:
+                # fallback to hparams if datamodule does not expose it
+                num_classes = self.hparams.data.num_classes
+            task = "multiclass"
+            self.acc_train = Accuracy(task=task, num_classes=num_classes)
+            self.acc_val = Accuracy(task=task, num_classes=num_classes)
+            self.acc_test = Accuracy(task=task, num_classes=num_classes)
 
     def configure_optimizers(
         self,
