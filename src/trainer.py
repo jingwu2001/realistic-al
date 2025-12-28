@@ -22,6 +22,8 @@ from query import QuerySampler
 from utils.io import save_json
 from utils.log_utils import log_git
 
+import torch.serialization as ser
+from omegaconf.dictconfig import DictConfig
 
 class ActiveTrainingLoop(object):
     def __init__(
@@ -170,6 +172,7 @@ class ActiveTrainingLoop(object):
         self.model.setup_data_params(datamodule)
         self.trainer.fit(model=self.model, datamodule=datamodule)
         if not self.cfg.trainer.fast_dev_run and self.cfg.trainer.load_best_ckpt:
+            ser.add_safe_globals([DictConfig])
             best_path = self.ckpt_callback.best_model_path
             logger.info("Final Model from: {}".format(best_path))
             self.model = self.model.load_from_checkpoint(best_path)
