@@ -48,3 +48,4 @@ dev = [
 where = ["src"]  # list of folders that contain the packages (["."] by default)
 
 pip install -e '.[dev]'
+pip install requests
