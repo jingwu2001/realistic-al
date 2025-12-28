@@ -6,10 +6,10 @@ from launcher import ExperimentLauncher
 config_dict = {
     "model": "resnet",
     "query": [
-        # "random",
-        # "entropy",
-        # "kcentergreedy",
-        # "bald",
+        "random",
+        "entropy",
+        "kcentergreedy",
+        "bald",
         "badge",
     ],
     # "data": ["cifar10"],  # , "cifar100"],
