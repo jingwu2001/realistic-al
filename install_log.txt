@@ -1,3 +1,7 @@
+conda create -n real-al python=3.10
+conda activate real-al
+pip install torch torchvision
+
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -42,3 +46,5 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]  # list of folders that contain the packages (["."] by default)
+
+pip install -e '.[dev]'
