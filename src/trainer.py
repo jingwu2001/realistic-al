@@ -22,8 +22,6 @@ from query import QuerySampler
 from utils.io import save_json
 from utils.log_utils import log_git
 
-import torch.serialization as ser
-from omegaconf.dictconfig import DictConfig
 
 class ActiveTrainingLoop(object):
     def __init__(
@@ -172,10 +170,11 @@ class ActiveTrainingLoop(object):
         self.model.setup_data_params(datamodule)
         self.trainer.fit(model=self.model, datamodule=datamodule)
         if not self.cfg.trainer.fast_dev_run and self.cfg.trainer.load_best_ckpt:
-            ser.add_safe_globals([DictConfig])
             best_path = self.ckpt_callback.best_model_path
             logger.info("Final Model from: {}".format(best_path))
-            self.model = self.model.load_from_checkpoint(best_path)
+            # self.model = self.model.load_from_checkpoint(best_path)
+            ckpt = torch.load(best_path, map_location="cpu", weights_only=False)
+            self.model.load_state_dict(ckpt["state_dict"], strict=True)
         else:
             logger.info("Final Model from last iteration.")
         gc.collect()
@@ -207,6 +206,13 @@ class ActiveTrainingLoop(object):
             os.makedirs(self.log_dir)
         save_meta = self.log_dir / "meta.json"
         save_json(meta_data, save_meta)
+
+    def log_save_dict(self):
+        """Persist collected run information if available."""
+        if not self._save_dict:
+            return
+        save_path = self.log_dir / "save_dict.json"
+        save_json(self._save_dict, save_path)
 
     def main(self):
         """Executing logic of the Trainer.
