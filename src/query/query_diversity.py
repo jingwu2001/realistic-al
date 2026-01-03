@@ -1,5 +1,7 @@
 from typing import Tuple
 
+
+import math
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -51,6 +53,11 @@ def query_sampler(
         )
         # there is no ranking, therefore we add descending numerics as ranking values
         return indices, np.arange(acq_size)[::-1]
+    elif name == "vendi":
+        indices, scores = _get_vendi(
+            cfg, model, labeled_dataloader, unlabeled_dataloader, acq_size=acq_size
+        )
+        return indices, scores
     else:
         raise NotImplementedError
 
@@ -246,3 +253,122 @@ def _get_kcg(
         # subtract the indices of the labeled data to get pool indices
         acq_indices -= indices_labeled.shape[0]
     return acq_indices
+
+@torch.no_grad()
+def _get_vendi(
+    cfg,
+    model: torch.nn.Module,
+    labeled_dataloader: DataLoader,
+    pool_loader: DataLoader,
+    acq_size: int = 100,
+):
+    assert hasattr(model, "get_features")  # model requires function get_features
+
+    gamma = cfg.query.vendigamma
+    batch_size = cfg.query.vendi.batch_size
+    normalization = cfg.query.vendi.normalization
+    q = cfg.query.vendi.q
+
+    features = torch.tensor([]).to(DEVICE)
+    for inputs, _ in labeled_dataloader:
+        inputs = inputs.to(DEVICE)
+        features_batch = model.get_features(inputs)
+        features = torch.cat((features, features_batch), 0)
+    feat_labeled = features.detach().cpu().numpy()
+
+    features = torch.tensor([]).to(DEVICE)
+    for inputs, _ in pool_loader:
+        inputs = inputs.to(DEVICE)
+        features_batch = model.get_features(inputs)
+        features = torch.cat((features, features_batch), 0)
+    feat_unlabeled = features.detach().cpu().numpy()
+
+    feat_labeled, feat_unlabeled = normalize_features(feat_labeled, feat_unlabeled, normalization)
+
+    L = feat_labeled.shape[0]
+    U = feat_unlabeled.shape[0]
+    K_LL = rbf_kernel(feat_labeled, feat_labeled, gamma=gamma).to(torch.float64)
+    K_UL = rbf_kernel(feat_unlabeled, feat_labeled, gamma=gamma).to(torch.float64)
+
+    K = torch.empty(batch_size, L + 1, L + 1, device=DEVICE, dtype=torch.float64)
+    K[:, :L, :L] = K_LL
+    K[:, L, L] = 1.0
+
+    scores = torch.empty(U, device=DEVICE, dtype=torch.float64)
+
+    num_iter = U // batch_size + 1
+    for i in range(num_iter):
+        K_UL_batch = K_UL[batch_size * i: batch_size * (i + 1)]
+        K[:batch_size, L, :L] = K_UL_batch
+        K[:batch_size, :L, L] = K_UL_batch
+
+        ev = torch.linalg.eigvalsh(K) / (L + 1)
+        entropy = renyi_entropy(ev, q)
+
+        scores[batch_size * i: batch_size * (i + 1)] = entropy
+    
+    scores = scores.exp().detach().cpu().numpy()
+    indices = np.argsort(scores)[::-1][:acq_size]
+
+    del K, K_LL, K_UL
+    torch.cuda.empty_cache()
+    
+    return indices, scores[indices]
+
+    
+def normalize_features(
+    feat_labeled: torch.tensor, 
+    feat_unlabeled: torch.tensor, 
+    normalization: str
+    ) -> torch.tensor:
+
+    normalization = normalization.lower()
+
+    if normalization == "none":
+        return feat_labeled, feat_unlabeled
+
+    if normalization == "l2":
+        feat_labeled = F.normalize(feat_labeled, p=2, dim=1)
+        feat_unlabeled = F.normalize(feat_unlabeled, p=2, dim=1)
+
+    elif normalization == 'minmax':
+        feat_all = torch.cat([feat_labeled, feat_unlabeled], dim=0)
+        min_all = torch.min(feat_all, dim=0)[0]
+        max_all = torch.max(feat_all, dim=0)[0]
+        feat_labeled = (feat_labeled - min_all) / (max_all - min_all)
+        feat_unlabeled = (feat_unlabeled - min_all) / (max_all - min_all)
+
+    elif normalization == 'zscore':
+        feat_all = torch.cat([feat_labeled, feat_unlabeled], dim=0)
+        mean_all = torch.mean(feat_all, dim=0)
+        std_all  = torch.std(feat_all , dim=0)
+        feat_labeled = (feat_labeled - mean_all) / std_all
+        feat_unlabeled = (feat_unlabeled - mean_all) / std_all
+
+    else:
+        raise ValueError(f"Unknown normalization: {normalization}")
+    
+    return feat_labeled, feat_unlabeled
+
+def rbf_kernel(x, y=None, gamma=None):
+    if y is None:
+        y = x
+    if gamma is None:
+        gamma = 1.0 / x.shape[1]
+
+    x_norm = (x**2).sum(dim=1).view(-1, 1)
+    y_norm = (y**2).sum(dim=1).view(1, -1)
+    dist = x_norm + y_norm - 2.0 * (x @ y.T)
+    return torch.exp(-gamma * dist)
+
+def renyi_entropy(p: torch.Tensor, q: float) -> torch.Tensor:
+    """
+    Assume the input is (N, D),
+    where N is the batch size and D is the dimension of the distribution
+    """
+    assert q > 0, "q must be > 0"
+
+    if math.isclose(q, 1.0, rel_tol=1e-9, abs_tol=1e-12):
+        return torch.special.entr(p).sum(dim=1)
+
+    return p.pow(q).sum(dim=1).log() / (1 - q)
