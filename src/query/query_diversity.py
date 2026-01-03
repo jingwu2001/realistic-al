@@ -13,7 +13,7 @@ from models.bayesian_module import BayesianModule
 
 from .kcenterGreedy import KCenterGreedy
 
-NAMES = ["kcentergreedy", "badge"]
+NAMES = ["kcentergreedy", "badge", "vendi"]
 
 DEVICE = "cuda:0"
 
@@ -260,14 +260,16 @@ def _get_vendi(
     model: torch.nn.Module,
     labeled_dataloader: DataLoader,
     pool_loader: DataLoader,
-    acq_size: int = 100,
+    acq_size: int = 128,
 ):
     assert hasattr(model, "get_features")  # model requires function get_features
 
-    gamma = cfg.query.vendigamma
-    batch_size = cfg.query.vendi.batch_size
-    normalization = cfg.query.vendi.normalization
-    q = cfg.query.vendi.q
+    vendi_cfg = cfg.query.vendi
+
+    gamma = vendi_cfg.gamma
+    batch_size = vendi_cfg.batch_size if vendi_cfg.batch_size is not None else 200
+    normalization = vendi_cfg.normalization
+    q = vendi_cfg.q
 
     features = torch.tensor([]).to(DEVICE)
     for inputs, _ in labeled_dataloader:
