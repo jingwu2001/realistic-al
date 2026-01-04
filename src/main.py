@@ -118,6 +118,11 @@ def active_loop(
         added_labels=add_labels,
         request_pool=request_pool,
     )
+
+    for i, store in enumerate(active_stores):
+        if store.extra_info is not None:
+            np.savez(os.path.join(store_path, f"extra_info_{i}.npz"), **store.extra_info)
+
     logger.success("Active Loop was finalized")
 
 

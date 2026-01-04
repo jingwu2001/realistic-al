@@ -1,6 +1,6 @@
 name: vendi
 vendi:
   batch_size: 64
-  normalization: l2
+  normalization: minmax
   q: 1.0
   gamma: 1.0

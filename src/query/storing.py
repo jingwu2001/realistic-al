@@ -13,3 +13,4 @@ class ActiveStore:
     accuracy_val: float  # accuracy on validation set
     accuracy_test: float  # accuracy on test set
     labels: np.ndarray  # what are the requested labels
+    extra_info: dict = None # extra info to save

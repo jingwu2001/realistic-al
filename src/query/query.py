@@ -45,7 +45,7 @@ class QuerySampler:
 
     def query_samples(
         self, datamodule: BaseDataModule, fastrandom: bool = False
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[dict]]:
         """Query samples with the selected Query Sampler for the Active Datamodule
 
         Args:
@@ -62,6 +62,7 @@ class QuerySampler:
                 replace=False,
             )
             acq_vals = np.arange(self.cfg.active.acq_size) * -1
+            extra_info = None
 
         else:
             # possibility to select random subset of pool with certain Size via parameter m
@@ -76,9 +77,15 @@ class QuerySampler:
                 batch_size=datamodule.batch_size
             )
 
-            acq_inds, acq_vals = self.ranking_step(pool_loader, labeled_loader)
+            # acq_inds, acq_vals = self.ranking_step(pool_loader, labeled_loader)
+            results = self.ranking_step(pool_loader, labeled_loader)
+            if len(results) == 2:
+                acq_inds, acq_vals = results
+                extra_info = None
+            else:
+                acq_inds, acq_vals, extra_info = results
             acq_inds = datamodule.get_pool_indices(acq_inds)
-        return acq_inds, acq_vals
+        return acq_inds, acq_vals, extra_info
 
     def active_callback(
         self, datamodule: BaseDataModule, vis: bool = False
@@ -92,7 +99,12 @@ class QuerySampler:
         Returns:
             ActiveStore: Carries output values.
         """
-        acq_inds, acq_vals = self.query_samples(datamodule)
+        results = self.query_samples(datamodule)
+        if len(results) == 2:
+            acq_inds, acq_vals = results
+            extra_info = None
+        else:
+            acq_inds, acq_vals, extra_info = results
 
         acq_data, acq_labels = obtain_data_from_pool(
             datamodule.train_set.pool, acq_inds
@@ -126,6 +138,7 @@ class QuerySampler:
             accuracy_val=accuracy_val,
             accuracy_test=accuracy_test,
             labels=acq_labels,
+            extra_info=extra_info,
         )
 
     def setup(self):
@@ -152,22 +165,29 @@ class QuerySampler:
             post_acq_function = query_uncertainty.get_post_acq_function(
                 self.cfg, device=self.device
             )
-            acq_ind, acq_scores = query_uncertainty.query_sampler(
+            acq_results = query_uncertainty.query_sampler(
                 pool_loader,
                 acq_function,
                 post_acq_function,
                 acq_size=acq_size,
                 device=self.device,
             )
+            extra_info = None
         elif self.acq_method.split("_")[0] in query_diversity.NAMES:
-            acq_ind, acq_scores = query_diversity.query_sampler(
+            acq_results = query_diversity.query_sampler(
                 self.cfg, self.model, labeled_loader, pool_loader, acq_size=acq_size
             )
 
         else:
             raise NotImplementedError()
 
-        return acq_ind, acq_scores
+        if len(acq_results) == 2:
+            acq_ind, acq_scores = acq_results
+            extra_info = None
+        else:
+            acq_ind, acq_scores, extra_info = acq_results
+
+        return acq_ind, acq_scores, extra_info
 
 
 def obtain_data_from_pool(pool: Dataset, indices: Iterable[int]):

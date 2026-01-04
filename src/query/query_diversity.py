@@ -1,4 +1,5 @@
-from typing import Tuple
+from typing import Tuple, Optional
+from tqdm import tqdm
 
 
 import math
@@ -24,7 +25,7 @@ def query_sampler(
     labeled_dataloader: DataLoader,
     unlabeled_dataloader: DataLoader,
     acq_size: int,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, Optional[dict]]:
     """Computes queries for all diversity based query methods.
     IMPLEMENTATION: Add diversity queries here.
 
@@ -36,7 +37,7 @@ def query_sampler(
         acq_size (int): size of query in datapoints.
 
     Returns:
-        Tuple[np.ndarray, np.ndarray]: [pool_indices, ranking values]
+        Tuple[np.ndarray, np.ndarray, dict]: [pool_indices, ranking values, extra_info]
     """
     name = cfg.query.name
     ### IMPLEMENTATION
@@ -54,10 +55,11 @@ def query_sampler(
         # there is no ranking, therefore we add descending numerics as ranking values
         return indices, np.arange(acq_size)[::-1]
     elif name == "vendi":
-        indices, scores = _get_vendi(
+        indices, scores, extra_info = _get_vendi(
             cfg, model, labeled_dataloader, unlabeled_dataloader, acq_size=acq_size
         )
-        return indices, scores
+
+        return indices, scores, extra_info
     else:
         raise NotImplementedError
 
@@ -276,14 +278,14 @@ def _get_vendi(
         inputs = inputs.to(DEVICE)
         features_batch = model.get_features(inputs)
         features = torch.cat((features, features_batch), 0)
-    feat_labeled = features.detach().cpu().numpy()
+    feat_labeled = features
 
     features = torch.tensor([]).to(DEVICE)
     for inputs, _ in pool_loader:
         inputs = inputs.to(DEVICE)
         features_batch = model.get_features(inputs)
         features = torch.cat((features, features_batch), 0)
-    feat_unlabeled = features.detach().cpu().numpy()
+    feat_unlabeled = features
 
     feat_labeled, feat_unlabeled = normalize_features(feat_labeled, feat_unlabeled, normalization)
 
@@ -299,23 +301,32 @@ def _get_vendi(
     scores = torch.empty(U, device=DEVICE, dtype=torch.float64)
 
     num_iter = U // batch_size + 1
-    for i in range(num_iter):
+    for i in tqdm(range(num_iter)):
         K_UL_batch = K_UL[batch_size * i: batch_size * (i + 1)]
-        K[:batch_size, L, :L] = K_UL_batch
-        K[:batch_size, :L, L] = K_UL_batch
+        current_batch_size = K_UL_batch.shape[0]
+        K_batch = K[:current_batch_size]
 
-        ev = torch.linalg.eigvalsh(K) / (L + 1)
+        K_batch[:, L, :L] = K_UL_batch
+        K_batch[:, :L, L] = K_UL_batch
+
+        ev = torch.linalg.eigvalsh(K_batch) / (L + 1)
         entropy = renyi_entropy(ev, q)
 
         scores[batch_size * i: batch_size * (i + 1)] = entropy
     
     scores = scores.exp().detach().cpu().numpy()
+    
+    # Sort scores descending
+    sorted_scores = np.sort(scores)[::-1]
+    
     indices = np.argsort(scores)[::-1][:acq_size]
+    
+    extra_info_dict = calculate_extra_info(acq_size, sorted_scores)
 
     del K, K_LL, K_UL
     torch.cuda.empty_cache()
     
-    return indices, scores[indices]
+    return indices, scores[indices], extra_info_dict
 
     
 def normalize_features(
@@ -374,3 +385,27 @@ def renyi_entropy(p: torch.Tensor, q: float) -> torch.Tensor:
         return torch.special.entr(p).sum(dim=1)
 
     return p.pow(q).sum(dim=1).log() / (1 - q)
+
+def calculate_extra_info(acq_size, sorted_scores):
+    """
+    store the maximum and minimmum scores of acquired samples, and also the max, min, and medium of unacquried samples
+
+    Args
+    sorted_scores: SORTED acq scores
+    """
+
+    if isinstance(sorted_scores, torch.Tensor):
+        sorted_scores = sorted_scores.detach().cpu().numpy()
+    acquired = sorted_scores[:acq_size]
+    unacquried = sorted_scores[acq_size + 1:]
+
+    funcs = [np.max, np.min, np.median]
+    acquired_stats = np.array([func(acquired) for func in funcs])
+    unacquried_stats = np.array([func(unacquried) for func in funcs])
+
+    results = {
+        "acq": acquired_stats,
+        "else": unacquried_stats
+    }
+
+    return results
