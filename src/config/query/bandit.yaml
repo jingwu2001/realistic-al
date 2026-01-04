@@ -1,0 +1,6 @@
+name: bandit
+bandit:
+  epsilon: 0.1 # Example parameter, though we are using UCB
+  c: 1.0       # UCB exploration parameter
+  alpha: 0.1
+  context_dim: 4
