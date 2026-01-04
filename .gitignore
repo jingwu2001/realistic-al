@@ -149,3 +149,14 @@ dmypy.json
 
 # datasets
 datasets/*
+
+# all checkpoints
+*.ckpt
+*.pkl
+*.npz
+
+# logs
+*.log
+
+# tensorboard
+*.tfevents.*
