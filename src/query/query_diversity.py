@@ -274,8 +274,12 @@ def _get_vendi(
     feat_labeled, feat_unlabeled = normalize_features(feat_labeled, feat_unlabeled, normalization)
 
     scores = vendi_from_features(cfg, feat_labeled, feat_unlabeled)
+    scores = vendi_from_features(cfg, feat_labeled, feat_unlabeled)
     
     # Sort scores descending
+    sorted_indices = np.argsort(scores)[::-1]
+    sorted_scores = scores[sorted_indices]
+    acq_indices = sorted_indices[:acq_size]
     sorted_indices = np.argsort(scores)[::-1]
     sorted_scores = scores[sorted_indices]
     acq_indices = sorted_indices[:acq_size]
@@ -283,6 +287,8 @@ def _get_vendi(
     extra_info_dict = calculate_extra_info(acq_size, sorted_scores)
 
     return acq_indices, sorted_scores[:acq_size], extra_info_dict
+    return acq_indices, sorted_scores[:acq_size], extra_info_dict
+
 
 
 def normalize_features(
