@@ -266,69 +266,25 @@ def _get_vendi(
 ):
     assert hasattr(model, "get_features")  # model requires function get_features
 
-    vendi_cfg = cfg.query.vendi
+    normalization = cfg.query.vendi.normalization
 
-    gamma = vendi_cfg.gamma
-    batch_size = vendi_cfg.batch_size if vendi_cfg.batch_size is not None else 200
-    normalization = vendi_cfg.normalization
-    q = vendi_cfg.q
-
-    features = torch.tensor([]).to(DEVICE)
-    for inputs, _ in labeled_dataloader:
-        inputs = inputs.to(DEVICE)
-        features_batch = model.get_features(inputs)
-        features = torch.cat((features, features_batch), 0)
-    feat_labeled = features
-
-    features = torch.tensor([]).to(DEVICE)
-    for inputs, _ in pool_loader:
-        inputs = inputs.to(DEVICE)
-        features_batch = model.get_features(inputs)
-        features = torch.cat((features, features_batch), 0)
-    feat_unlabeled = features
+    feat_labeled = get_embeddings(model, labeled_dataloader, cpu=False, numpy=False)
+    feat_unlabeled = get_embeddings(model,pool_loader, cpu=False, numpy=False)
 
     feat_labeled, feat_unlabeled = normalize_features(feat_labeled, feat_unlabeled, normalization)
 
-    L = feat_labeled.shape[0]
-    U = feat_unlabeled.shape[0]
-    K_LL = rbf_kernel(feat_labeled, feat_labeled, gamma=gamma).to(torch.float64)
-    K_UL = rbf_kernel(feat_unlabeled, feat_labeled, gamma=gamma).to(torch.float64)
-
-    K = torch.empty(batch_size, L + 1, L + 1, device=DEVICE, dtype=torch.float64)
-    K[:, :L, :L] = K_LL
-    K[:, L, L] = 1.0
-
-    scores = torch.empty(U, device=DEVICE, dtype=torch.float64)
-
-    num_iter = U // batch_size + 1
-    for i in tqdm(range(num_iter)):
-        K_UL_batch = K_UL[batch_size * i: batch_size * (i + 1)]
-        current_batch_size = K_UL_batch.shape[0]
-        K_batch = K[:current_batch_size]
-
-        K_batch[:, L, :L] = K_UL_batch
-        K_batch[:, :L, L] = K_UL_batch
-
-        ev = torch.linalg.eigvalsh(K_batch) / (L + 1)
-        entropy = renyi_entropy(ev, q)
-
-        scores[batch_size * i: batch_size * (i + 1)] = entropy
-    
-    scores = scores.exp().detach().cpu().numpy()
+    scores = vendi_from_features(cfg, feat_labeled, feat_unlabeled)
     
     # Sort scores descending
-    sorted_scores = np.sort(scores)[::-1]
-    
-    indices = np.argsort(scores)[::-1][:acq_size]
+    sorted_indices = np.argsort(scores)[::-1]
+    sorted_scores = scores[sorted_indices]
+    acq_indices = sorted_indices[:acq_size]
     
     extra_info_dict = calculate_extra_info(acq_size, sorted_scores)
 
-    del K, K_LL, K_UL
-    torch.cuda.empty_cache()
-    
-    return indices, scores[indices], extra_info_dict
+    return acq_indices, sorted_scores[:acq_size], extra_info_dict
 
-    
+
 def normalize_features(
     feat_labeled: torch.tensor, 
     feat_unlabeled: torch.tensor, 
@@ -409,3 +365,54 @@ def calculate_extra_info(acq_size, sorted_scores):
     }
 
     return results
+
+@torch.no_grad()
+def get_embeddings(model, loader, cpu=False, numpy=False):
+    features = torch.tensor([]).to(DEVICE)
+    for inputs, _ in loader:
+        inputs = inputs.to(DEVICE)
+        features_batch = model.get_features(inputs)
+        features = torch.cat((features, features_batch), 0)
+    features = features.detach()
+    if numpy:
+        features = features.cpu().numpy()
+    elif cpu:
+        features = features.cpu()
+    return features
+
+def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
+    vendi_cfg = cfg.query.vendi
+    gamma = vendi_cfg.gamma
+    q = vendi_cfg.q
+    batch_size = vendi_cfg.batch_size if vendi_cfg.batch_size is not None else 200
+
+    L = feat_labeled.shape[0]
+    U = feat_unlabeled.shape[0]
+    K_LL = rbf_kernel(feat_labeled, feat_labeled, gamma=gamma).to(torch.float64)
+    K_UL = rbf_kernel(feat_unlabeled, feat_labeled, gamma=gamma).to(torch.float64)
+
+    K = torch.empty(batch_size, L + 1, L + 1, device=DEVICE, dtype=torch.float64)
+    K[:, :L, :L] = K_LL
+    K[:, L, L] = 1.0
+
+    scores = torch.empty(U, device=DEVICE, dtype=torch.float64)
+
+    num_iter = U // batch_size + 1
+    for i in tqdm(range(num_iter), desc="Calculating Vendi scores"):
+        K_UL_batch = K_UL[batch_size * i: batch_size * (i + 1)]
+        current_batch_size = K_UL_batch.shape[0]
+        K_batch = K[:current_batch_size]
+
+        K_batch[:, L, :L] = K_UL_batch
+        K_batch[:, :L, L] = K_UL_batch
+
+        ev = torch.linalg.eigvalsh(K_batch) / (L + 1)
+        entropy = renyi_entropy(ev, q)
+
+        scores[batch_size * i: batch_size * (i + 1)] = entropy
+
+    del K, K_LL, K_UL
+    torch.cuda.empty_cache()
+    
+    scores = scores.exp().detach().cpu().numpy()
+    return scores

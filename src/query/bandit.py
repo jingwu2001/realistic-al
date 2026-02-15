@@ -1,12 +1,12 @@
 import numpy as np
 from loguru import logger
-from . import utils
+import utils
 
 class BanditManager:
     """
     A manager that treats diveristy and uncertainty sampling as the two arms of a contextual bandit.
     """
-    def __init__(self, context_dim: int = 4, alpha: float = 0.1):
+    def __init__(self, context_dim: int = 4, alpha: float = 0.1, seed: int = 42):
         self.alpha = alpha
         self.context_dim = context_dim
         
@@ -17,7 +17,7 @@ class BanditManager:
         
         self.start_state = None
         
-        self._tie_break_rng = np.random.default_rng()
+        self._tie_break_rng = np.random.default_rng(seed)
         
         self.latest_x = None
         self.latest_arm = None
@@ -33,19 +33,11 @@ class BanditManager:
         # 1. Inverse and Mean Reward
         A_inv = np.linalg.inv(self.A)               # (2, d, d)
         theta = (A_inv @ self.beta).squeeze(-1)     # (2, d, 1) -> (2, d)
-        
-        # theta @ x.T creates a (2, 2) matrix where diagonal elements 
-        # represent (Arm0_Theta * Arm0_X) and (Arm1_Theta * Arm1_X)
-        # However, since x is distinct for each arm (Contextual), we can do element-wise dot product
-        # x shape (2, d), theta shape (2, d)
+
         mean_reward = np.sum(theta * x, axis=1) # (2,)
 
         # 2. Uncertainty Term: alpha * sqrt(x^T * A^-1 * x)
-        # Reshape x to (2, d, 1) for batch matrix multiplication
         x_batch = x[:, :, None]
-        
-        # Calculate quadratic form (mahalanobis distance) per arm
-        # (2, 1, d) @ (2, d, d) @ (2, d, 1) -> (2, 1, 1)
         matrix_variance = x_batch.transpose(0, 2, 1) @ A_inv @ x_batch
         uncertainty = self.alpha * np.sqrt(matrix_variance.flatten())
 
