@@ -18,7 +18,7 @@ from models.callbacks.metrics_callback import (
     ImbClassMetricCallback,
     ISIC2016MetricCallback,
 )
-from query import QuerySampler
+from query import QuerySampler, BanditQuerySampler
 from utils.io import save_json
 from utils.log_utils import log_git
 
@@ -32,6 +32,7 @@ class ActiveTrainingLoop(object):
         active: bool = True,
         base_dir: str = os.getcwd(),  # TODO: change this to some other value!
         loggers: str = True,
+        bandit_manager=None,
     ):
         # Class capturing the logic for Active Training Loops.
         self.cfg = cfg
@@ -47,6 +48,7 @@ class ActiveTrainingLoop(object):
         self.loggers = False
         if loggers:
             self.loggers = self._init_loggers()
+        self.bandit_manager = bandit_manager
 
     def _init_ckpt_callback(self) -> pl.callbacks.ModelCheckpoint:
         ckpt_path = os.path.join(self.log_dir, "checkpoints")
@@ -187,9 +189,17 @@ class ActiveTrainingLoop(object):
         """Execute active learning logic. -- not included in main.
         Returns the queries to the oracle."""
         self.model = self.model.to(self.device)
-        query_sampler = QuerySampler(
-            self.cfg, self.model, count=self.count, device=self.device
-        )
+        
+        if self.bandit_manager:
+            query_sampler = BanditQuerySampler(
+                self.cfg, self.model, count=self.count, device=self.device,
+                bandit_manager=self.bandit_manager
+            )
+        else:
+            query_sampler = QuerySampler(
+                self.cfg, self.model, count=self.count, device=self.device
+            )
+            
         query_sampler.setup()
         stored = query_sampler.active_callback(self.datamodule)
         return stored
