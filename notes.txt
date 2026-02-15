@@ -1,0 +1,2 @@
+Experiments run on the week of Jan 17:
+    Bandit: feature not scaled. 4 features for each arm
