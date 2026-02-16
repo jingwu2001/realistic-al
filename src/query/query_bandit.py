@@ -1,6 +1,7 @@
 from typing import Optional, Tuple
 import numpy as np
 import torch
+import sklearn
 from omegaconf import DictConfig
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -136,7 +137,7 @@ class BanditQuerySampler(QuerySampler):
 
 def calculate_vendi_score(feats, gamma=None, q=1.0):
     # Kernel matrix
-    K = query_diversity.rbf_kernel(feats, gamma=gamma).to(torch.float64)
+    K = sklearn.metrics.pairwise.rbf_kernel(feats, gamma=gamma).to(torch.float64)
     # Normalize by N
     N = K.shape[0]
     K = K / N

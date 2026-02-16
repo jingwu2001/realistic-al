@@ -1,6 +1,7 @@
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
 from tqdm import tqdm
-
+import sys
+import os
 
 import math
 import numpy as np
@@ -10,13 +11,15 @@ from omegaconf import DictConfig
 from scipy import stats
 from torch.utils.data import DataLoader
 
+from kcenterGreedy import KCenterGreedy
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from models.bayesian_module import BayesianModule
 
-from .kcenterGreedy import KCenterGreedy
 
 NAMES = ["kcentergreedy", "badge", "vendi"]
 
-DEVICE = "cuda:0"
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
 def query_sampler(
@@ -272,21 +275,19 @@ def _get_vendi(
     feat_unlabeled = get_embeddings(model,pool_loader, cpu=False, numpy=False)
 
     feat_labeled, feat_unlabeled = normalize_features(feat_labeled, feat_unlabeled, normalization)
+    # feat_labeled: (num_labeled, feature_dim)
+    # feat_unlabeled: (num_unlabeled, feature_dim)
 
     scores = vendi_from_features(cfg, feat_labeled, feat_unlabeled)
-    scores = vendi_from_features(cfg, feat_labeled, feat_unlabeled)
+    # scores: (num_unlabeled,)
     
     # Sort scores descending
-    sorted_indices = np.argsort(scores)[::-1]
-    sorted_scores = scores[sorted_indices]
-    acq_indices = sorted_indices[:acq_size]
     sorted_indices = np.argsort(scores)[::-1]
     sorted_scores = scores[sorted_indices]
     acq_indices = sorted_indices[:acq_size]
     
     extra_info_dict = calculate_extra_info(acq_size, sorted_scores)
 
-    return acq_indices, sorted_scores[:acq_size], extra_info_dict
     return acq_indices, sorted_scores[:acq_size], extra_info_dict
 
 
@@ -326,6 +327,11 @@ def normalize_features(
     return feat_labeled, feat_unlabeled
 
 def rbf_kernel(x, y=None, gamma=None):
+    """
+    x: (N, D)
+    y: (M, D)
+    gamma: float
+    """
     if y is None:
         y = x
     if gamma is None:
@@ -335,6 +341,8 @@ def rbf_kernel(x, y=None, gamma=None):
     y_norm = (y**2).sum(dim=1).view(1, -1)
     dist = x_norm + y_norm - 2.0 * (x @ y.T)
     return torch.exp(-gamma * dist)
+
+
 
 def renyi_entropy(p: torch.Tensor, q: float) -> torch.Tensor:
     """
@@ -387,6 +395,22 @@ def get_embeddings(model, loader, cpu=False, numpy=False):
     return features
 
 def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
+    """
+    Args:
+        cfg: config
+        feat_labeled: (num_labeled, feature_dim)
+        feat_unlabeled: (num_unlabeled, feature_dim)
+    Returns:
+        scores: (num_unlabeled,)
+
+    Intermediates:
+        K_LL: (L, L)
+        K_UL: (U, L)
+        K: (batch_size, L + 1, L + 1)
+        
+        In each iteration the algorithm takes batch_size samples from K_UL and paste it into off-diagonal blocks,
+        and diagonalize the matrices
+    """
     vendi_cfg = cfg.query.vendi
     gamma = vendi_cfg.gamma
     q = vendi_cfg.q
@@ -394,12 +418,18 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
 
     L = feat_labeled.shape[0]
     U = feat_unlabeled.shape[0]
-    K_LL = rbf_kernel(feat_labeled, feat_labeled, gamma=gamma).to(torch.float64)
-    K_UL = rbf_kernel(feat_unlabeled, feat_labeled, gamma=gamma).to(torch.float64)
+
+    # K_LL and K_UL are kernel matrices
+
+    K_LL = compute_kernel_matrix(cfg, feat_labeled, feat_labeled).to(torch.float64)
+    K_UL = compute_kernel_matrix(cfg, feat_unlabeled, feat_labeled).to(torch.float64)
 
     K = torch.empty(batch_size, L + 1, L + 1, device=DEVICE, dtype=torch.float64)
     K[:, :L, :L] = K_LL
     K[:, L, L] = 1.0
+    print("K shape: ", K.shape)
+    print("K_UL shape: ", K_UL.shape)
+    print("K_LL shape: ", K_LL.shape)
 
     scores = torch.empty(U, device=DEVICE, dtype=torch.float64)
 
@@ -422,3 +452,51 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
     
     scores = scores.exp().detach().cpu().numpy()
     return scores
+
+def compute_kernel_matrix(
+    cfg: DictConfig, 
+    x: Union[np.ndarray, torch.tensor], 
+    y: Union[np.ndarray, torch.tensor],
+) -> torch.Tensor:
+    """
+    Compute the kernel matrix in batch style.
+    DOES NOT PERFORM NORMALIZATION
+
+    feat_labeled: (L, D)
+    feat_unlabeled: (U, D)
+    """
+    vendi_cfg = cfg.query.vendi
+
+    if vendi_cfg.kernel == 'rbf':
+        return sklearn.metrics.pairwise.rbf_kernel(x, y, gamma=vendi_cfg.gamma)
+    elif vendi_cfg.kernel == 'cosine':
+        return sklearn.metrics.pairwise.cosine_similarity(x, y)
+    else:
+        raise ValueError(f"Unknown kernel: {vendi_cfg.kernel}")
+
+
+# TODO: 
+# 0. add docstring indicating input/output/variable shapes (Done)
+# 1. implement cosine kernel logic  (Done)
+# 2. refactor the code
+# 3. sweep different kernel and hyperparameters (rbf gamma)
+# 4. add more options to vendi config
+# 5. debug 
+
+# 6. implement time series
+
+if __name__ == '__main__':
+    x = torch.rand(3, 10)
+    y = torch.rand(2, 10)
+    cfg = DictConfig({
+        "query": {
+            "vendi": {
+                "gamma": 1.0,
+                "q": 1.0,
+                "batch_size": 200,
+                "kernel": "rbf"
+            }
+        }
+    })
+    scores = vendi_from_features(cfg, x, y)
+    print(scores)
