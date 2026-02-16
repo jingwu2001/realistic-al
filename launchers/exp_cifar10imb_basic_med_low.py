@@ -5,6 +5,7 @@ from launcher import ExperimentLauncher
 config_dict = {
     "model": "resnet",
     "query": [
+        # "bandit",
         "vendi",
         # "random",
         # "entropy",
@@ -14,8 +15,8 @@ config_dict = {
     ],
     "data": ["cifar10_imb"],
     "active": [
-        # "cifar10_low",
-        "cifar10_med",
+        "cifar10_low",
+        # "cifar10_med",
         # "cifar10_high",
     ],  # did not run! "standard_250", "cifar10_low_data"
     "optim": ["sgd_cosine"],
@@ -24,12 +25,13 @@ config_dict = {
 hparam_dict = {
     "model.weighted_loss": True,
     # "data.val_size": [50 * 5, 250 * 5, None],
-    "data.val_size": [250 * 5],
+    # "data.val_size": [50 * 5, 250 * 5],
+    "data.val_size": [50 * 5],
     "trainer.seed": [12345, 12346, 12347],
     "trainer.max_epochs": 200,
     "model.weight_decay": 5e-3,
-    # "model.dropout_p": [0, 0, 0, 0, 0.5, 0],
-    "model.dropout_p": [0],
+    # "model.dropout_p": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+    "model.dropout_p": [0.5],
     "model.learning_rate": [0.1],
     "model.use_ema": False,
     "data.transform_train": [
