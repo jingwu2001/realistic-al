@@ -22,7 +22,8 @@ plt.rc("font", size=12)
 
 ### Set Paths
 # contains RESULTSPATH/DATASET/LABEL-REGIME/EXPERIMENT/SEEDS/LOOPS
-RESULTSPATH = "/mnt/drive_nvme2/logs_cluster/activelearning"
+# RESULTSPATH = "/mnt/drive_nvme2/logs_cluster/activelearning"
+RESULTSPATH = "/home/jing/Desktop/realistic-al/experiments/activelearning"
 
 # will be filled with results
 SAVEPATH = "./plots"
@@ -69,7 +70,10 @@ QUERYMETHODS = {
     "entropy": "Entropy",
     "random": "Random",
     "badge": "BADGE",
-    "batchbald": "BatchBALD",
+    # "batchbald": "BatchBALD",
+    "vendi-l2": "Vendi-L2",
+    "vendi-minmax": "Vendi-MinMax",
+    "bandit": "Bandit",
 }
 
 PALETTE = {
@@ -78,7 +82,10 @@ PALETTE = {
     "Entropy": "tab:orange",
     "BADGE": "tab:purple",
     "Random": "tab:red",
-    "BatchBALD": "tab:cyan",
+    # "BatchBALD": "tab:cyan",
+    "Vendi-L2": "tab:cyan",
+    "Vendi-MinMax": "tab:brown",
+    "Bandit": "tab:pink",
 }
 
 
@@ -185,17 +192,21 @@ def load_full_data(
     full_data_dict = {}
 
     for key, path in full_paths.items():
-        test_acc_df = pd.read_csv(path / "test_acc.csv", index_col=0)
-        full_data_dict[key] = {}
-        full_data_dict[key]["test_acc"] = {}
-        full_data_dict[key]["test_acc"]["mean"] = float(test_acc_df["Mean"])
-        full_data_dict[key]["test_acc"]["std"] = float(test_acc_df["STD"])
+        try:
+            test_acc_df = pd.read_csv(path / "test_acc.csv", index_col=0)
+            full_data_dict[key] = {}
+            full_data_dict[key]["test_acc"] = {}
+            full_data_dict[key]["test_acc"]["mean"] = float(test_acc_df["Mean"])
+            full_data_dict[key]["test_acc"]["std"] = float(test_acc_df["STD"])
 
-        if (path / "test_w_acc.csv").is_file():
-            mean_recall_df = pd.read_csv(path / "test_w_acc.csv", index_col=0)
-            full_data_dict[key]["test/w_acc"] = {}
-            full_data_dict[key]["test/w_acc"]["mean"] = float(mean_recall_df["Mean"])
-            full_data_dict[key]["test/w_acc"]["std"] = float(mean_recall_df["STD"])
+            if (path / "test_w_acc.csv").is_file():
+                mean_recall_df = pd.read_csv(path / "test_w_acc.csv", index_col=0)
+                full_data_dict[key]["test/w_acc"] = {}
+                full_data_dict[key]["test/w_acc"]["mean"] = float(mean_recall_df["Mean"])
+                full_data_dict[key]["test/w_acc"]["std"] = float(mean_recall_df["STD"])
+        except FileNotFoundError:
+            print(f"Full data not found for {key} at {path}")
+            continue
     return full_data_dict
 
 
@@ -467,7 +478,7 @@ if __name__ == "__main__":
         "sem-sl": {"Self-SL": [False], "Semi-SL": [True]},
     }
 
-    plot_settings = {"sharey": [True, False], "upper_bound": [True, False]}
+    plot_settings = {"sharey": [True, False], "upper_bound": [False]}
 
     plot_settings_list = product_of_dictionary(plot_settings)
 

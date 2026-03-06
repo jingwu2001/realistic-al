@@ -113,6 +113,18 @@ class BaseLauncher:
 
         temp_naming_convention = self.validify_string_for_format(self.naming_convention)
 
+        # Check if query is bandit or vendi, if not remove Vendi params from naming convention
+        query = naming_dict.get("query")
+        if query not in ["bandit", "vendi"]:
+            # Remove the Vendi specific parts
+            temp_naming_convention = temp_naming_convention.replace("_norm-{query.vendi.normalization}", "")
+            temp_naming_convention = temp_naming_convention.replace("_kernel-{query.vendi.kernel}", "")
+            temp_naming_convention = temp_naming_convention.replace("_gamma-{query.vendi.gamma}", "")
+            
+        kernel = naming_dict.get("query.vendi.kernel")
+        if query in ['bandit', 'vendi'] and kernel == 'cosine':
+            temp_naming_convention = temp_naming_convention.replace("_gamma-{query.vendi.gamma}", "")
+
         return temp_naming_convention.format_map(temp_dict)
 
     @staticmethod

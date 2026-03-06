@@ -1,0 +1,16 @@
+- model=resnet
+- query=kcentergreedy
+- data=cifar10
+- active=cifar10_med
+- optim=sgd_cosine
+- ++data.val_size=2500
+- ++trainer.seed=12347
+- ++trainer.max_epochs=200
+- ++model.dropout_p=0
+- ++model.learning_rate=0.1
+- ++model.use_ema=False
+- ++data.transform_train=cifar_randaugmentMC
+- ++trainer.precision=16
+- ++trainer.batch_size=1024
+- ++trainer.deterministic=True
+- ++trainer.experiment_name=cifar10/active-cifar10_med/basic_model-resnet_drop-0_aug-cifar_randaugmentMC_acq-kcentergreedy_ep-200

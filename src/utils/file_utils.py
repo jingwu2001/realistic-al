@@ -1,4 +1,4 @@
-from collections import MutableMapping
+from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
@@ -29,7 +29,7 @@ def get_all_files_naming(root: Path, pattern: str) -> List[Path]:
     return files
 
 
-from collections import MutableMapping
+from collections.abc import MutableMapping
 
 
 # code to convert init_dict to flattened dictionary

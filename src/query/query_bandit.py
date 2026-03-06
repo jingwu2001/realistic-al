@@ -1,7 +1,6 @@
 from typing import Optional, Tuple
 import numpy as np
 import torch
-import sklearn
 from omegaconf import DictConfig
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -10,6 +9,7 @@ from .query import QuerySampler
 from .bandit import BanditManager
 from . import query_uncertainty
 from . import query_diversity
+from .query_diversity import rbf_kernel, cosine_similarity
 from models.bayesian_module import ConsistentMCDropout
 
 def set_dropout_p(model: nn.Module, p: float):
@@ -98,10 +98,10 @@ class BanditQuerySampler(QuerySampler):
 
         feat_Q_L = torch.cat([feat_Q, feat_labeled], dim=0)
 
-        gamma, q = cfg.query.vendi.gamma, cfg.query.vendi.q
-        vendi_Q_L = calculate_vendi_score(feat_Q_L, gamma, q)
-        vendi_Q = calculate_vendi_score(feat_Q, gamma, q)
-        vendi_L = calculate_vendi_score(feat_labeled, gamma, q)
+        gamma, q, kernel = cfg.query.vendi.gamma, cfg.query.vendi.q, cfg.query.vendi.kernel
+        vendi_Q_L = calculate_vendi_score(cfg, feat_Q_L)
+        vendi_Q = calculate_vendi_score(cfg, feat_Q)
+        vendi_L = calculate_vendi_score(cfg, feat_labeled)
 
         set_dropout_p(model, original_p)
 
@@ -135,9 +135,22 @@ class BanditQuerySampler(QuerySampler):
             return acq_indices_vendi, acq_vals_vendi, {"bandit_arm": 1}
 
 
-def calculate_vendi_score(feats, gamma=None, q=1.0):
+def calculate_vendi_score(cfg, feats):
+    """
+    IMPORTANT: sklearn kernels take numpy array or torch tensor on CPU, not tensor on GPU
+    """
+    vendi_cfg = cfg.query.vendi
+    gamma, q, kernel = vendi_cfg.gamma, vendi_cfg.q, vendi_cfg.kernel
+
     # Kernel matrix
-    K = sklearn.metrics.pairwise.rbf_kernel(feats, gamma=gamma).to(torch.float64)
+    if kernel == 'rbf':
+        K = rbf_kernel(feats, gamma=gamma)
+    elif kernel == 'cosine':
+        K = cosine_similarity(feats)
+    else:
+        raise ValueError(f"Unknown kernel: {kernel}")
+    
+    K = torch.as_tensor(K, dtype=torch.float64)
     # Normalize by N
     N = K.shape[0]
     K = K / N

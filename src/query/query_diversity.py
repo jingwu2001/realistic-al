@@ -2,7 +2,6 @@ from typing import Tuple, Optional, Union
 from tqdm import tqdm
 import sys
 import os
-
 import math
 import numpy as np
 import torch
@@ -11,7 +10,7 @@ from omegaconf import DictConfig
 from scipy import stats
 from torch.utils.data import DataLoader
 
-from kcenterGreedy import KCenterGreedy
+from .kcenterGreedy import KCenterGreedy
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from models.bayesian_module import BayesianModule
@@ -342,6 +341,15 @@ def rbf_kernel(x, y=None, gamma=None):
     dist = x_norm + y_norm - 2.0 * (x @ y.T)
     return torch.exp(-gamma * dist)
 
+def cosine_similarity(x, y=None):
+    """
+    x: (N, D)
+    y: (M, D)
+    """
+    if y is None:
+        y = x
+    return (x @ y.T) / (torch.norm(x, dim=1, p=2).view(-1, 1) * torch.norm(y, dim=1, p=2).view(1, -1))    
+
 
 
 def renyi_entropy(p: torch.Tensor, q: float) -> torch.Tensor:
@@ -421,8 +429,10 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
 
     # K_LL and K_UL are kernel matrices
 
-    K_LL = compute_kernel_matrix(cfg, feat_labeled, feat_labeled).to(torch.float64)
-    K_UL = compute_kernel_matrix(cfg, feat_unlabeled, feat_labeled).to(torch.float64)
+    K_LL = compute_kernel_matrix(cfg, feat_labeled, feat_labeled)
+    K_LL = torch.as_tensor(K_LL, dtype=torch.float64, device=DEVICE)
+    K_UL = compute_kernel_matrix(cfg, feat_unlabeled, feat_labeled)
+    K_UL = torch.as_tensor(K_UL, dtype=torch.float64, device=DEVICE)
 
     K = torch.empty(batch_size, L + 1, L + 1, device=DEVICE, dtype=torch.float64)
     K[:, :L, :L] = K_LL
@@ -468,9 +478,9 @@ def compute_kernel_matrix(
     vendi_cfg = cfg.query.vendi
 
     if vendi_cfg.kernel == 'rbf':
-        return sklearn.metrics.pairwise.rbf_kernel(x, y, gamma=vendi_cfg.gamma)
+        return rbf_kernel(x, y, gamma=vendi_cfg.gamma)
     elif vendi_cfg.kernel == 'cosine':
-        return sklearn.metrics.pairwise.cosine_similarity(x, y)
+        return cosine_similarity(x, y)
     else:
         raise ValueError(f"Unknown kernel: {vendi_cfg.kernel}")
 

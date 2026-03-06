@@ -5,8 +5,8 @@ from launcher import ExperimentLauncher
 config_dict = {
     "model": "resnet",
     "query": [
-        "bandit",
-        # "vendi",
+        # "bandit",
+        "vendi",
         # "random",
         # "entropy",
         # "kcentergreedy",
@@ -15,17 +15,23 @@ config_dict = {
     ],
     "data": ["cifar10"],
     "active": [
-        "cifar10_low",
+        # "cifar10_low",
         "cifar10_med",
         # "cifar10_high",
     ],
     "optim": ["sgd_cosine"],
+    # "query.vendi.kernel": ["rbf", "rbf", "rbf", "cosine"],
+    "query.vendi.kernel": ["rbf"],
+    # "query.vendi.gamma": [0.1, 1.0, 10.0, None],
+    "query.vendi.gamma": [10.0],
+    "query.vendi.normalization": ["minmax"],
 }
 
 hparam_dict = {
     # "data.val_size": [250, 2500, None],
-    "data.val_size": [250, 2500],
-    "trainer.seed": [12345, 12346, 12347],
+    "data.val_size": [2500],
+    # "trainer.seed": [12345, 12346, 12347],
+    "trainer.seed": [12345],
     "trainer.max_epochs": 200,
     "model.dropout_p": [0.5],
     "model.learning_rate": [0.1],
@@ -38,13 +44,14 @@ hparam_dict = {
     "trainer.deterministic": True,
 }
 naming_conv = (
-    "{data}/active-{active}/basic_model-{model}_drop-{model.dropout_p}_aug-{data.transform_train}_acq-{query}_ep-{trainer.max_epochs}"
+    "{data}/active-{active}/basic_model-{model}_drop-{model.dropout_p}_aug-{data.transform_train}_acq-{query}_norm-{query.vendi.normalization}_kernel-{query.vendi.kernel}_gamma-{query.vendi.gamma}_ep-{trainer.max_epochs}"
     # "active_basic_{data}_set-{active}_{model}_acq-{query}_ep-{trainer.max_epochs}"
 )
 
 joint_iteration = [
     ["active", "data.val_size"],
     ["query", "model.dropout_p"],
+    ["query.vendi.kernel", "query.vendi.gamma"],
 ]
 
 path_to_ex_file = "src/main.py"
