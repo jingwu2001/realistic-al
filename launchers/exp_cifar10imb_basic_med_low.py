@@ -16,23 +16,22 @@ config_dict = {
     "data": ["cifar10_imb"],
     "active": [
         "cifar10_low",
-        # "cifar10_med",
+        "cifar10_med",
         # "cifar10_high",
     ],  # did not run! "standard_250", "cifar10_low_data"
     "optim": ["sgd_cosine"],
     # "query.vendi.kernel": ["rbf", "rbf", "rbf", "cosine"],
     # "query.vendi.gamma": [0.1, 1.0, 10.0, None],
     "query.vendi.kernel": ["rbf"],
-    "query.vendi.gamma": [10.0],
+    "query.vendi.gamma": [1.0],
     "query.vendi.normalization": ["minmax"],
 }
 
 hparam_dict = {
     "model.weighted_loss": True,
     # "data.val_size": [50 * 5, 250 * 5, None],
-    "data.val_size": [50 * 5],
-    # "trainer.seed": [12345, 12346, 12347],
-    "trainer.seed": [12346],
+    "data.val_size": [50 * 5, 250 * 5],
+    "trainer.seed": [12345, 12346, 12347],
     "trainer.max_epochs": 200,
     "model.weight_decay": 5e-3,
     "model.dropout_p": [0.5],
@@ -45,11 +44,11 @@ hparam_dict = {
     "trainer.precision": 16,
     "trainer.deterministic": True,
 }
-naming_conv = "{data}/active-{active}/basic_model-{model}_drop-{model.dropout_p}_aug-{data.transform_train}_acq-{query}_norm-{query.vendi.normalization}_kernel-{query.vendi.kernel}_gamma-{query.vendi.gamma}_ep-{trainer.max_epochs}__wloss-{model.weighted_loss}"
+naming_conv = "{data}/active-{active}/basic_model-{model}_drop-{model.dropout_p}_aug-{data.transform_train}_acq-{query}_ep-{trainer.max_epochs}__wloss-{model.weighted_loss}"
 
 joint_iteration = [
     ["model.dropout_p", "query"],
-    ["query.vendi.kernel", "query.vendi.gamma"],
+    # ["query.vendi.kernel", "query.vendi.gamma"],
     ["data.val_size", "active"]
 ]
 

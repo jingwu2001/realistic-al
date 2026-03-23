@@ -11,7 +11,6 @@ import datetime
 import colorsys
 
 # --- Configuration ---
-args.results_path = "/home/jing/Desktop/realistic-al/experiments/activelearning"
 
 # Mapping from experiment folder name key to display name
 # Ensure keys match 'acq-{key}' in folder names
@@ -29,11 +28,13 @@ QUERYMETHODS = {
 }
 
 PALETTE = {
-    "BALD": "#4C72B0",      # slate blue
-    "Core-Set": "#55A868",  # medium green
-    "Entropy": "#8172B2",   # muted purple
-    "BADGE": "#64B5CD",     # steel blue
+    "BALD": "#d62728",      # distinct red
+    "Core-Set": "#1f77b4",  # distinct blue
+    "Entropy": "#2ca02c",   # distinct green
+    "BADGE": "#9467bd",     # distinct purple
     "Random": "#6B6B6B",    # neutral grey
+    "Vendi": "#3939C6",     # distinct orange ###
+    "Bandit": "#e79e00",    # distinct brown
 }
 
 SKIP_DIR = [
@@ -41,7 +42,7 @@ SKIP_DIR = [
     'active-cifar10_high'
 ]
 
-granulairty = "kernel"
+granularity = "kernel"
 
 # SKIP_CRITERION = lambda x: 'drop-0' in x
 
@@ -102,7 +103,7 @@ def _load_regime(regime_dir, skip_before, skip_after, label_suffix, not_finished
 
         method_name = QUERYMETHODS[method_key]
 
-        if granulairty == "kernel":
+        if granularity == "kernel":
             kernel_params = get_kernel_params(exp_dir.name)
             if kernel_params['kernel']:
                 method_name += f"-{kernel_params['kernel']}"
@@ -113,9 +114,8 @@ def _load_regime(regime_dir, skip_before, skip_after, label_suffix, not_finished
             method_name += f" {label_suffix}"
 
         seeds_data = []
-        for seed_dir in exp_dir.iterdir():
-            if not seed_dir.is_dir():
-                continue
+        valid_seed_dirs = sorted([d for d in exp_dir.iterdir() if d.is_dir()], key=lambda x: x.name)
+        for seed_dir in valid_seed_dirs[-3:]:
 
             try:
                 run_time = datetime.datetime.strptime(seed_dir.name, "%Y-%m-%d_%H-%M-%S-%f")
@@ -133,11 +133,11 @@ def _load_regime(regime_dir, skip_before, skip_after, label_suffix, not_finished
 
             try:
                 df = pd.read_csv(metric_file)
-                if len(df) < 10:
+                if len(df) < 8:
                     not_finished.append(seed_dir)
                     continue
                 df = df.reset_index(drop=True)
-                df.rename(columns={"test/acc": "Accuracy"}, inplace=True)
+                df.rename(columns={"test/acc": "Accuracy", "test/bacc": "Balanced Accuracy"}, inplace=True)
                 df["Method"] = method_name
                 df["Cycle"] = df.index
                 df["Run"] = seed_dir.name
@@ -175,13 +175,13 @@ def main(prefix, title, show_std=True):
     met_exceptions = []
     # --- Iterate over Datasets (e.g. cifar10_imb) ---
     for dataset_dir in base_path.iterdir():
-        if not dataset_dir.is_dir() or dataset_dir.name in SKIP_DIR:
+        if not dataset_dir.is_dir() or dataset_dir.name != "ecg5000":
             print(f"Skipping: {dataset_dir}")
             continue
 
         # --- Iterate over Label Regimes (e.g. active-cifar10_med) ---
         for regime_dir in dataset_dir.iterdir():
-            if not regime_dir.is_dir() or regime_dir.name in SKIP_DIR:
+            if not regime_dir.is_dir() or regime_dir.name not in ["active-ecg5000_low", "active-ecg5000_10"]:
                 continue
             print(f"  {dataset_dir.name} / {regime_dir.name}")
             all_data = []
@@ -217,33 +217,38 @@ def main(prefix, title, show_std=True):
                 hues = np.linspace(hue_min, hue_max, n) % 1.0
                 return [colorsys.hls_to_rgb(h, lightness, saturation) for h in hues]
 
-            # Vendi: teal/cyan/sky-blue family  (cool)
-            vendi_colors = hue_sweep_palette(len(vendi_methods), 0.47, 0.60) if vendi_methods else []
-            # Bandit: crimson/orange/amber family  (warm)
-            n_bandit = len(bandit_methods)
-            if n_bandit == 1:
-                bandit_colors = [colorsys.hls_to_rgb(0.04, 0.45, 0.85)]  # vivid orange-red
-            elif n_bandit > 1:
-                bandit_colors = hue_sweep_palette(n_bandit, 0.98, 0.10)
-            else:
-                bandit_colors = []
-            other_colors = sns.color_palette("husl", len(other_methods)) if other_methods else []
+            current_palette = PALETTE
 
-            for i, m in enumerate(vendi_methods):
-                current_palette[m] = vendi_colors[i]
+            # # Vendi: teal/cyan/sky-blue family  (cool)
+            # vendi_colors = hue_sweep_palette(len(vendi_methods), 0.47, 0.60) if vendi_methods else []
+            # # Bandit: crimson/orange/amber family  (warm)
+            # n_bandit = len(bandit_methods)
+            # if n_bandit == 1:
+            #     bandit_colors = [colorsys.hls_to_rgb(0.04, 0.45, 0.85)]  # vivid orange-red
+            # elif n_bandit > 1:
+            #     bandit_colors = hue_sweep_palette(n_bandit, 0.98, 0.10)
+            # else:
+            #     bandit_colors = []
+            # other_colors = sns.color_palette("husl", len(other_methods)) if other_methods else []
 
-            for i, m in enumerate(bandit_methods):
-                current_palette[m] = bandit_colors[i]
+            # for i, m in enumerate(vendi_methods):
+            #     current_palette[m] = vendi_colors[i]
 
-            c_idx = 0
-            for m in other_methods:
-                if m in PALETTE:
-                    current_palette[m] = PALETTE[m]
-                else:
-                    current_palette[m] = other_colors[c_idx]
-                    c_idx += 1
+            # for i, m in enumerate(bandit_methods):
+            #     current_palette[m] = bandit_colors[i]
 
-            # --- Plotting ---
+            # c_idx = 0
+            # for m in other_methods:
+            #     if m in PALETTE:
+            #         current_palette[m] = PALETTE[m]
+            #     else:
+            #         current_palette[m] = other_colors[c_idx]
+            #         c_idx += 1
+
+            print(f"DEBUG - current_palette: {current_palette}")
+            print(f"DEBUG - unique_methods: {unique_methods}")
+
+            # --- Plotting Accuracy ---
             plt.figure(figsize=(10, 6))
             sns.lineplot(
                 data=plot_df,
@@ -254,18 +259,40 @@ def main(prefix, title, show_std=True):
                 ci="sd" if show_std else None,  # Standard Deviation
                 marker="o"
             )
-            plt.title(f"{dataset_dir.name} - {regime_dir.name} - {title}")
+            plt.title(f"{dataset_dir.name} - {regime_dir.name} - Accuracy - {title}")
             plt.ylabel("Test Accuracy")
             plt.xlabel("Active Learning Cycle")
             plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             plt.tight_layout()
 
-            filename = f"{prefix}_{dataset_dir.name}_{regime_dir.name}.png"
+            filename = f"{prefix}_{dataset_dir.name}_{regime_dir.name}_acc.png"
             plt.savefig(save_path / filename, dpi=300)
             plt.close()
             print(f"  Saved plot to {save_path / filename}")
 
-            # --- Selected Methods Plot ---
+            # --- Plotting Balanced Accuracy ---
+            plt.figure(figsize=(10, 6))
+            sns.lineplot(
+                data=plot_df,
+                x="Cycle",
+                y="Balanced Accuracy",
+                hue="Method",
+                palette=current_palette,
+                ci="sd" if show_std else None,  # Standard Deviation
+                marker="o"
+            )
+            plt.title(f"{dataset_dir.name} - {regime_dir.name} - Balanced Accuracy - {title}")
+            plt.ylabel("Test Balanced Accuracy")
+            plt.xlabel("Active Learning Cycle")
+            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            plt.tight_layout()
+
+            filename_bacc = f"{prefix}_{dataset_dir.name}_{regime_dir.name}_bacc.png"
+            plt.savefig(save_path / filename_bacc, dpi=300)
+            plt.close()
+            print(f"  Saved bacc plot to {save_path / filename_bacc}")
+
+            # --- Selected Methods Plot (Accuracy) ---
             # When granularity is 'kernel', base method names might be extended.
             # So we select any method that starts with the base names.
             base_selected_methods = ["Random", "BALD", "Vendi", "Bandit"]
@@ -283,16 +310,39 @@ def main(prefix, title, show_std=True):
                     ci="sd" if show_std else None,
                     marker="o"
                 )
-                plt.title(f"{dataset_dir.name} - {regime_dir.name} - {title} (Selected)")
+                plt.title(f"{dataset_dir.name} - {regime_dir.name} - Accuracy - {title} (Selected)")
                 plt.ylabel("Test Accuracy")
                 plt.xlabel("Active Learning Cycle")
                 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
                 plt.tight_layout()
 
-                sel_filename = f"{filename.replace('.png', '')}_selected.png"
+                sel_filename = f"{filename.replace('_acc.png', '')}_selected_acc.png"
                 plt.savefig(save_path / sel_filename, dpi=300)
                 plt.close()
                 print(f"  Saved selected plot to {save_path / sel_filename}")
+
+            # --- Selected Methods Plot (Balanced Accuracy) ---
+            if not selected_df.empty:
+                plt.figure(figsize=(10, 6))
+                sns.lineplot(
+                    data=selected_df,
+                    x="Cycle",
+                    y="Balanced Accuracy",
+                    hue="Method",
+                    palette=current_palette,
+                    ci="sd" if show_std else None,
+                    marker="o"
+                )
+                plt.title(f"{dataset_dir.name} - {regime_dir.name} - Balanced Accuracy - {title} (Selected)")
+                plt.ylabel("Test Balanced Accuracy")
+                plt.xlabel("Active Learning Cycle")
+                plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                plt.tight_layout()
+
+                sel_filename_bacc = f"{filename_bacc.replace('_bacc.png', '')}_selected_bacc.png"
+                plt.savefig(save_path / sel_filename_bacc, dpi=300)
+                plt.close()
+                print(f"  Saved selected bacc plot to {save_path / sel_filename_bacc}")
 
             # --- Save AUBC ---
             if aubc_results:
@@ -342,7 +392,6 @@ if __name__ == "__main__":
                         help="Base path for the experiments.")
     parser.add_argument("--save-path", type=str, default="./plots_simple",
                         help="Path to save the plots.")
-    parser.add_argument("")
 
     args = parser.parse_args()
 

@@ -4,5 +4,9 @@ defaults:
 name: bandit
 bandit:
   alpha: 1.0
-  contexts: {unc: ["bald_q", "bald_rest"], div: ["vendi_q", "vendi_q_l"]}
+  context_dim: 6
+  num_classes: 10
+  contexts:
+    unc: ["mean_bald_Q_u", "mean_bald_Q_d", "mean_bald_L", "cls_dist", "t", "bias"]
+    div: ["vendi_Q_u_L",   "vendi_Q_d_L",   "vendi_L",    "cls_dist", "t", "bias"]
   normalize_features: true

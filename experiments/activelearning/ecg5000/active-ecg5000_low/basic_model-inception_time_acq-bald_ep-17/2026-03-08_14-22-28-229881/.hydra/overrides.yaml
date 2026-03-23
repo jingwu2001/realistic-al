@@ -1,0 +1,17 @@
+- model=inception_time
+- query=bald
+- data=ecg5000
+- active=ecg5000_low
+- optim=adam
+- ++data.val_size=100
+- ++trainer.seed=12346
+- ++trainer.max_epochs=17
+- ++model.dropout_p=0.5
+- ++model.learning_rate=0.0001442986898059786
+- ++trainer.precision=32
+- ++trainer.batch_size=8
+- ++trainer.deterministic=True
+- ++query.vendi.kernel=rbf
+- ++query.vendi.gamma=1.0
+- ++query.vendi.normalization=minmax
+- ++trainer.experiment_name=ecg5000/active-ecg5000_low/basic_model-inception_time_acq-bald_ep-17

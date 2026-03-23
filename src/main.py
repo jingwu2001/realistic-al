@@ -114,6 +114,21 @@ def active_loop(
 
         if training_loop.trainer.interrupted:
             return
+
+        # Save metrics for this completed training loop before attempting the query
+        metric_paths.append(training_loop.log_dir)
+        training_loop.log_save_dict()
+
+        # Guard: stop early if the pool is too small to fill the next acquisition batch
+        pool_size = len(datamodule.train_set.pool)
+        if pool_size < acq_size:
+            logger.warning(
+                f"Pool exhausted after loop {i} ({pool_size} samples remaining, "
+                f"acq_size={acq_size}). Stopping early and saving results."
+            )
+            del training_loop
+            break
+
         logger.info("Start Acquisition of Loop {}".format(i))
         active_store = training_loop.active_callback()
         
@@ -127,10 +142,8 @@ def active_loop(
                 
         datamodule.train_set.label(active_store.requests)
         active_stores.append(active_store)
-        training_loop.log_save_dict()
         cfg.active.num_labelled += cfg.active.acq_size
         logger.info("Finalized Loop {}".format(i))
-        metric_paths.append(training_loop.log_dir)
         del training_loop
         time.sleep(1)
 

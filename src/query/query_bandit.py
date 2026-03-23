@@ -12,10 +12,48 @@ from . import query_diversity
 from .query_diversity import rbf_kernel, cosine_similarity
 from models.bayesian_module import ConsistentMCDropout
 
+
+def _class_distribution_entropy(labels: np.ndarray, num_classes: int) -> float:
+    """Normalized entropy of the labeled-set class distribution.
+
+    Returns a value in [0, 1], where 1 = perfectly balanced and 0 = all samples
+    in one class.  Uses log(num_classes) for normalization so the scale is
+    always comparable regardless of the number of classes.
+    """
+    counts = np.bincount(labels, minlength=num_classes).astype(float)
+    p = counts / counts.sum()
+    p_nonzero = p[p > 0]
+    ent = -np.sum(p_nonzero * np.log(p_nonzero))
+    return float(ent / np.log(num_classes))
+
 def set_dropout_p(model: nn.Module, p: float):
     for module in model.modules():
         if isinstance(module, ConsistentMCDropout):
             module.p = p
+
+def _get_rng_states(device):
+    import random
+    cpu_rng = torch.random.get_rng_state()
+    gpu_rng = None
+    if isinstance(device, torch.device) and device.type == 'cuda':
+        gpu_rng = torch.cuda.get_rng_state(device)
+    elif isinstance(device, str) and 'cuda' in device:
+        gpu_rng = torch.cuda.get_rng_state(device)
+    np_rng = np.random.get_state()
+    py_rng = random.getstate()
+    return cpu_rng, gpu_rng, np_rng, py_rng
+
+def _set_rng_states(device, states):
+    import random
+    cpu_rng, gpu_rng, np_rng, py_rng = states
+    torch.random.set_rng_state(cpu_rng)
+    if gpu_rng is not None:
+        if isinstance(device, torch.device) and device.type == 'cuda':
+            torch.cuda.set_rng_state(gpu_rng, device)
+        elif isinstance(device, str) and 'cuda' in device:
+            torch.cuda.set_rng_state(gpu_rng, device)
+    np.random.set_state(np_rng)
+    random.setstate(py_rng)
 
 class BanditQuerySampler(QuerySampler):
     def __init__(
@@ -32,7 +70,7 @@ class BanditQuerySampler(QuerySampler):
     def ranking_step(
         self, pool_loader: DataLoader, labeled_loader: DataLoader
     ) -> Tuple[np.ndarray, np.ndarray]:
-        
+
         if not self.bandit_manager:
             return super().ranking_step(pool_loader, labeled_loader)
 
@@ -43,95 +81,129 @@ class BanditQuerySampler(QuerySampler):
 
         original_p = cfg.model.dropout_p
 
+        before_state = _get_rng_states(device)
+
+        # ------------------------------------------------------------------ #
+        # 1. BALD scores over the pool (with dropout enabled)                 #
+        # ------------------------------------------------------------------ #
         set_dropout_p(model, original_p)
-        
-        # --- 1. Compute Uncertainty (BALD) Arm Features ---
-        # Temporarily perform BALD sampling
-        # We need BALD scores for the whole pool
-        # To get BALD scores specifically, we might need to force the function if cfg.query.name is 'bandit'
-        # The reference code uses BALD specifically.
-        # Let's get BALD function directly
+
         bald_fct = query_uncertainty._get_bald_fct(model)
+
         def _return_all(scores, size):
             return scores, size
 
-        bald_scores_all, _ = query_uncertainty.query_sampler(
+        bald_scores_pool, _ = query_uncertainty.query_sampler(
             pool_loader,
             acq_function=bald_fct,
             post_acq_function=_return_all,
             acq_size=acq_size,
-            device=device
+            device=device,
         )
-        assert len(bald_scores_all.shape) == 1
-        bald_scores_all_sorted = np.argsort(bald_scores_all)[::-1]
-        b_queried_idx = bald_scores_all_sorted[:acq_size]
-        b_queried_values = bald_scores_all[b_queried_idx]
-        
-        # get bald scores of the pool samples not queried
-        mask = np.ones_like(bald_scores_all, dtype=bool)
-        mask[b_queried_idx] = False
-        b_leftout_values = bald_scores_all[mask]
-        
-        mean_bald_q = b_leftout_values.mean()
-        mean_bald_rest = b_leftout_values.mean()
+        assert len(bald_scores_pool.shape) == 1
 
+        # Q_u  — top-k by BALD (uncertainty arm)
+        sorted_bald = np.argsort(bald_scores_pool)[::-1].copy()   # .copy() → positive strides
+        acq_indices_bald = sorted_bald[:acq_size]           # pool indices
+        acq_vals_bald    = bald_scores_pool[acq_indices_bald]
 
+        mean_bald_Q_u = bald_scores_pool[acq_indices_bald].mean()   # FIX: was using leftout
+        mean_bald_Q_d_placeholder = None   # filled below after Vendi selects Q_d
+
+        # BALD scores over the labeled set (baseline reference)
+        bald_scores_L, _ = query_uncertainty.query_sampler(
+            labeled_loader,
+            acq_function=bald_fct,
+            post_acq_function=_return_all,
+            acq_size=len(labeled_loader.dataset),
+            device=device,
+        )
+        mean_bald_L = float(bald_scores_L.mean())
+
+        bald_state = _get_rng_states(device)
+        _set_rng_states(device, before_state)
+
+        # ------------------------------------------------------------------ #
+        # 2. Vendi scores / embeddings (dropout disabled)                     #
+        # ------------------------------------------------------------------ #
         set_dropout_p(model, 0.0)
 
         normalization = cfg.query.vendi.normalization
+        feat_labeled   = query_diversity.get_embeddings(model, labeled_loader, cpu=False, numpy=False)
+        feat_unlabeled = query_diversity.get_embeddings(model, pool_loader,   cpu=False, numpy=False)
+        feat_labeled, feat_unlabeled = query_diversity.normalize_features(
+            feat_labeled, feat_unlabeled, normalization
+        )
 
-        feat_labeled = query_diversity.get_embeddings(model, labeled_loader, cpu=False, numpy=False)
-        feat_unlabeled = query_diversity.get_embeddings(model, pool_loader, cpu=False, numpy=False)
+        vendi_scores_pool = query_diversity.vendi_from_features(cfg, feat_labeled, feat_unlabeled)
 
-        feat_labeled, feat_unlabeled = query_diversity.normalize_features(feat_labeled, feat_unlabeled, normalization)
+        # Q_d  — top-k by Vendi (diversity arm)
+        sorted_vendi      = np.argsort(vendi_scores_pool)[::-1].copy()
+        acq_indices_vendi = sorted_vendi[:acq_size]            # pool indices
+        acq_vals_vendi    = vendi_scores_pool[acq_indices_vendi]
 
-        scores = query_diversity.vendi_from_features(cfg, feat_labeled, feat_unlabeled)
+        # Features for Vendi arm: vendi(L + Q_u), vendi(L + Q_d), vendi(L)
+        feat_Q_u   = feat_unlabeled[acq_indices_bald]
+        feat_Q_d   = feat_unlabeled[acq_indices_vendi]
 
-        sorted_indices_vendi = np.argsort(scores)[::-1].copy()
-        sorted_scores_vendi = scores[sorted_indices_vendi]
-        acq_indices_vendi = sorted_indices_vendi[:acq_size]
-        acq_vals_vendi = sorted_scores_vendi[:acq_size]
+        vendi_L       = calculate_vendi_score(cfg, feat_labeled)
+        vendi_Q_u_L   = calculate_vendi_score(cfg, torch.cat([feat_Q_u, feat_labeled], dim=0))
+        vendi_Q_d_L   = calculate_vendi_score(cfg, torch.cat([feat_Q_d, feat_labeled], dim=0))
 
-        
-
-        feat_Q = feat_unlabeled[acq_indices_vendi]
-
-        feat_Q_L = torch.cat([feat_Q, feat_labeled], dim=0)
-
-        gamma, q, kernel = cfg.query.vendi.gamma, cfg.query.vendi.q, cfg.query.vendi.kernel
-        vendi_Q_L = calculate_vendi_score(cfg, feat_Q_L)
-        vendi_Q = calculate_vendi_score(cfg, feat_Q)
-        vendi_L = calculate_vendi_score(cfg, feat_labeled)
+        # Now we can compute mean_bald(Q_d): BALD scores of the diversity-selected samples
+        mean_bald_Q_d = float(bald_scores_pool[acq_indices_vendi].mean())
 
         set_dropout_p(model, original_p)
 
-        total_iter = cfg.active.num_iter
-        if total_iter == 0: # Avoid division by zero if not set, though main sets it
-             total_iter = 1
+        # ------------------------------------------------------------------ #
+        # 3. Class distribution entropy                                       #
+        # ------------------------------------------------------------------ #
+        num_classes = cfg.query.bandit.get("num_classes", 10)
+        labeled_targets = np.array(labeled_loader.dataset.targets)
+        cls_dist = _class_distribution_entropy(labeled_targets, num_classes)
+
+        # ------------------------------------------------------------------ #
+        # 4. Assemble 6-D context features                                   #
+        # ------------------------------------------------------------------ #
+        total_iter = cfg.active.num_iter if cfg.active.num_iter > 0 else 1
         t_normalized = (self.count + 1) / total_iter
-        
-        # [mean_bald(Q), mean_bald(Rest), t, 1]
-        features_bald = np.array([mean_bald_q, mean_bald_rest, t_normalized, 1.0])
-        
-        # [vendi(L), vendi(L+Q), t, 1]
-        features_vendi = np.array([vendi_L, vendi_Q_L, t_normalized, 1.0])
 
-        # Normalize first two features (separately) so that they sum to 1 if configured
+        # BALD arm: [mean_bald(Q_u), mean_bald(Q_d), mean_bald(L), cls_dist, t, 1]
+        features_bald  = np.array([
+            mean_bald_Q_u, mean_bald_Q_d, mean_bald_L,
+            cls_dist, t_normalized, 1.0
+        ])
+
+        # Vendi arm: [vendi(L+Q_u), vendi(L+Q_d), vendi(L), cls_dist, t, 1]
+        features_vendi = np.array([
+            vendi_Q_u_L, vendi_Q_d_L, vendi_L,
+            cls_dist, t_normalized, 1.0
+        ])
+
         if cfg.query.bandit.normalize_features:
-            num_classes = 10
-            features_bald[:2] = features_bald[:2] / np.log(num_classes)
-            features_vendi[0] /= feat_labeled.shape[0]
-            features_vendi[1] /= (feat_labeled.shape[0] + feat_Q.shape[0])
-        
-        context_features = np.stack([features_bald, features_vendi]) # (2, 4)
+            # BALD features: scale by log(C) so they live in roughly [0, 1]
+            features_bald[:3] = features_bald[:3] / np.log(num_classes)
+            # Vendi features: scale by set sizes  (same logic as before, extended)
+            n_L  = feat_labeled.shape[0]
+            n_Q  = acq_size
+            features_vendi[0] /= (n_L + n_Q)   # vendi(L+Q_u)
+            features_vendi[1] /= (n_L + n_Q)   # vendi(L+Q_d)
+            features_vendi[2] /= n_L            # vendi(L)
 
-        # --- 4. Select Arm ---
+        context_features = np.stack([features_bald, features_vendi])  # (2, 6)
+
+        # ------------------------------------------------------------------ #
+        # 5. Select arm                                                       #
+        # ------------------------------------------------------------------ #
         selected_arm = self.bandit_manager.select_arm(context_features)
-        
-        # --- 5. Return Indices of Selected Arm ---
-        if selected_arm == 0: # BALD
-            return b_queried_idx, bald_scores_all[b_queried_idx], {"bandit_arm": 0}
-        else: # Vendi
+
+        vendi_state = _get_rng_states(device)
+
+        if selected_arm == 0:  # BALD / uncertainty
+            _set_rng_states(device, bald_state)
+            return acq_indices_bald, acq_vals_bald, {"bandit_arm": 0}
+        else:                  # Vendi / diversity
+            _set_rng_states(device, vendi_state)
             return acq_indices_vendi, acq_vals_vendi, {"bandit_arm": 1}
 
 
@@ -175,7 +247,11 @@ if __name__ == "__main__":
                 "q": 1.0,
                 "batch_size": 200
             },
-            "name": "bandit"
+            "name": "bandit",
+            "bandit": {
+                "normalize_features": False,
+                "num_classes": 10,
+            }
         },
         "active": {"num_iter": 10, "m": 1},
         "training": {"batch_size": 2}

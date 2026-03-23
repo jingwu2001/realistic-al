@@ -1,0 +1,14 @@
+name: bayesian_inception_time
+base_model: inceptiontime
+weight_decay: 1.7331257557031198e-05
+learning_rate: 0.0001442986898059786
+n_filters: 64
+bottleneck_channels: 64
+dropout_p: 0
+load_pretrained: Null
+freeze_encoder: False
+use_ema: False
+exclude_bn_bias: True
+k: 50
+finetune: False
+small_head: True

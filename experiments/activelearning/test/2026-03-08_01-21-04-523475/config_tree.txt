@@ -1,0 +1,73 @@
+CONFIG
+├── trainer
+│   └── seed: 12345                                                                                                                        
+│       batch_size: 8                                                                                                                      
+│       num_workers: 16                                                                                                                    
+│       persistent_workers: true                                                                                                           
+│       max_epochs: 2                                                                                                                      
+│       min_epochs: 50                                                                                                                     
+│       fast_dev_run: false                                                                                                                
+│       data_root: /home/jing/Desktop/realistic-al/datasets                                                                                
+│       experiments_root: /home/jing/Desktop/realistic-al/experiments/activelearning                                                       
+│       experiment_name: test                                                                                                              
+│       experiment_id: 2026-03-08_01-21-04-523475                                                                                          
+│       n_gpus: 1                                                                                                                          
+│       check_val_every_n_epoch: 1                                                                                                         
+│       progress_bar_refresh_rate: 1                                                                                                       
+│       gradient_clip_val: 0                                                                                                               
+│       early_stop: false                                                                                                                  
+│       precision: 32                                                                                                                      
+│       deterministic: true                                                                                                                
+│       profiler: null                                                                                                                     
+│       load_best_ckpt: true                                                                                                               
+│       save_last: false                                                                                                                   
+│       timeout: 60                                                                                                                        
+│       run_test: true                                                                                                                     
+│                                                                                                                                          
+├── model
+│   └── name: inception_time                                                                                                               
+│       base_model: inceptiontime                                                                                                          
+│       weight_decay: 1.7331257557031198e-05                                                                                               
+│       learning_rate: 0.0001442986898059786                                                                                               
+│       n_filters: 64                                                                                                                      
+│       bottleneck_channels: 64                                                                                                            
+│       dropout_p: 0.5                                                                                                                     
+│       load_pretrained: null                                                                                                              
+│       freeze_encoder: false                                                                                                              
+│       use_ema: false                                                                                                                     
+│       exclude_bn_bias: true                                                                                                              
+│       k: 50                                                                                                                              
+│       finetune: false                                                                                                                    
+│       small_head: true                                                                                                                   
+│                                                                                                                                          
+├── active
+│   └── num_labelled: 25                                                                                                                   
+│       min_train: 25                                                                                                                      
+│       balanced: true                                                                                                                     
+│       acq_size: 25                                                                                                                       
+│       num_iter: 10                                                                                                                       
+│       random_split: true                                                                                                                 
+│       m: null                                                                                                                            
+│                                                                                                                                          
+├── data
+│   └── name: ecg5000                                                                                                                      
+│       shape:                                                                                                                             
+│       - 1                                                                                                                                
+│       - 140                                                                                                                              
+│       num_classes: 5                                                                                                                     
+│       val_split: 1000                                                                                                                    
+│       mean:                                                                                                                              
+│       - 0.0                                                                                                                              
+│       std:                                                                                                                               
+│       - 1.0                                                                                                                              
+│       transform_train: ecg_basic                                                                                                         
+│       transform_test: basic                                                                                                              
+│       val_size: 1000                                                                                                                     
+│                                                                                                                                          
+└── optim
+    └── optimizer:                                                                                                                         
+          name: adam                                                                                                                       
+          momentum: 0.9                                                                                                                    
+        lr_scheduler:                                                                                                                      
+          name: steplr                                                                                                                     
+                                                                                                                                           

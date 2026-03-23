@@ -62,6 +62,12 @@ def get_transform(
         transform.append(_get_imagenet_randaugMC())
     elif name == "imagenet_test":
         transform.append(_get_imagenet_test_transform())
+    elif name == "ecg_basic":
+        from data.ecg5000_dataset import get_train_transform
+        return get_train_transform()
+    elif name == "basic" and shape is not None and shape[-1] == 140:
+        from data.ecg5000_dataset import get_eval_transform
+        return get_eval_transform()
 
     transform.append(_get_norm_transform(mean, std))
     transform = transforms.Compose(transform)

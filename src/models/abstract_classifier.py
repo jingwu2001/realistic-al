@@ -13,6 +13,7 @@ from loguru import logger
 from pl_bolts.optimizers.lr_scheduler import linear_warmup_decay
 from pytorch_lightning.loggers import TensorBoardLogger
 from torchmetrics import Accuracy
+from torchmetrics.classification import MulticlassRecall
 
 from .callbacks.ema_callback import EMAWeightUpdate
 from .utils import exclude_from_wt_decay, freeze_layers, load_from_ssl_checkpoint
@@ -38,6 +39,7 @@ class AbstractClassifier(pl.LightningModule):
         self.acc_train = None
         self.acc_val = None
         self.acc_test = None
+        self.bacc_test = None  # balanced accuracy (macro recall)
 
         self.loss_fct = nn.NLLLoss()
 
@@ -188,6 +190,8 @@ class AbstractClassifier(pl.LightningModule):
         loss, logprob, preds, y = self.step(batch)
         self.log(f"{mode}/loss", loss, on_step=False, on_epoch=True)
         self.acc_test.update(preds, y)
+        if self.bacc_test is not None:
+            self.bacc_test.update(preds, y)
         if batch_idx == 0:
             if len(batch[0].shape) == 4:
                 self.visualize_inputs(batch[0], name=f"{mode}/data")
@@ -232,6 +236,8 @@ class AbstractClassifier(pl.LightningModule):
     def on_test_epoch_start(self) -> None:
         """Rest test accuracy internal state."""
         self.acc_test.reset()
+        if self.bacc_test is not None:
+            self.bacc_test.reset()
 
     def on_train_epoch_end(self) -> None:
         """Log values during training to disk."""
@@ -247,6 +253,8 @@ class AbstractClassifier(pl.LightningModule):
         """Log values during test to disk."""
         mode = "test"
         self.log(f"{mode}/acc", self.acc_test.compute(), on_step=False, on_epoch=True)
+        if self.bacc_test is not None:
+            self.log(f"{mode}/bacc", self.bacc_test.compute(), on_step=False, on_epoch=True)
 
     def setup_data_params(self, dm: pl.LightningDataModule):
         """Create internal parameter with the amount of training iterations per epoch.
@@ -300,6 +308,8 @@ class AbstractClassifier(pl.LightningModule):
             self.acc_train = Accuracy(task=task, num_classes=num_classes)
             self.acc_val = Accuracy(task=task, num_classes=num_classes)
             self.acc_test = Accuracy(task=task, num_classes=num_classes)
+            # balanced accuracy = macro-averaged per-class recall
+            self.bacc_test = MulticlassRecall(num_classes=num_classes, average="macro")
 
     def configure_optimizers(
         self,

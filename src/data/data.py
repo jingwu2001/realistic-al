@@ -1,6 +1,6 @@
 # Adapterd from Pytorch Lighntning Bolts VisionDataModule  : https://github.com/PyTorchLightning/lightning-bolts
 from typing import Generator, Optional, Sequence, Union
-
+import os
 import numpy as np
 import pytorch_lightning as pl
 import torch
@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torchvision.datasets import CIFAR10, CIFAR100, MNIST, FashionMNIST
 
 from data.mio_dataset import MIOTCDDataset
+from data.ecg5000_dataset import ECG5000Dataset
 
 from .active import ActiveLearningDataset
 from .base_datamodule import BaseDataModule
@@ -68,8 +69,12 @@ class TorchVisionDM(BaseDataModule):
         self.mean = mean
         self.std = std
         self.shape = shape
-        assert shape[-1] == len(mean)
-        assert shape[-1] == len(std)
+        if len(shape) == 3:
+            assert shape[-1] == len(mean)
+            assert shape[-1] == len(std)
+        else:
+            assert shape[0] == len(mean)
+            assert shape[0] == len(std)
 
         self.train_transforms = get_transform(
             transform_train, self.mean, self.std, self.shape
@@ -95,6 +100,8 @@ class TorchVisionDM(BaseDataModule):
             self.dataset_cls = ISIC2019
         elif self.dataset == "miotcd":
             self.dataset_cls = MIOTCDDataset
+        elif self.dataset == "ecg5000":
+            self.dataset_cls = ECG5000Dataset
         else:
             raise NotImplementedError
         self._setup_datasets()
@@ -105,13 +112,24 @@ class TorchVisionDM(BaseDataModule):
     def _setup_datasets(self):
         """Creates the active training dataset and validation and test datasets"""
         try:
-            self.dataset_cls(root=self.data_root, download=False)
+            if self.dataset == "ecg5000":
+                self.dataset_cls(root=self.data_root) # does not take download args
+            else:
+                self.dataset_cls(root=self.data_root, download=False)
         except:  # Error is assumed here to stem from data not being present.
             # Download the TorchVision Dataset
-            self.dataset_cls(root=self.data_root, download=True)
-        self.train_set = self.dataset_cls(
-            self.data_root, train=True, transform=self.train_transforms
-        )
+            if self.dataset != "ecg5000":
+                self.dataset_cls(root=self.data_root, download=True)
+            
+        if self.dataset == "ecg5000":
+            ecg_root = os.path.join(self.data_root, "ecg5000")
+            self.train_set = self.dataset_cls(
+                root=ecg_root, split="train", transform=self.train_transforms
+            )
+        else:
+            self.train_set = self.dataset_cls(
+                self.data_root, train=True, transform=self.train_transforms
+            )
         self.train_set = self._split_dataset(self.train_set, train=True)
 
         if self.imbalance:
@@ -124,13 +142,22 @@ class TorchVisionDM(BaseDataModule):
                 self.train_set, pool_specifics={"transform": self.test_transforms}
             )
 
-        self.val_set = self.dataset_cls(
-            self.data_root, train=True, transform=self.test_transforms
-        )
+        if self.dataset == "ecg5000":
+            ecg_root = os.path.join(self.data_root, "ecg5000")
+            self.val_set = self.dataset_cls(
+                root=ecg_root, split="train", transform=self.test_transforms
+            )
+            self.test_set = self.dataset_cls(
+                root=ecg_root, split="test", transform=self.test_transforms
+            )
+        else:
+            self.val_set = self.dataset_cls(
+                self.data_root, train=True, transform=self.test_transforms
+            )
+            self.test_set = self.dataset_cls(
+                self.data_root, train=False, transform=self.test_transforms
+            )
         self.val_set = self._split_dataset(self.val_set, train=False)
-        self.test_set = self.dataset_cls(
-            self.data_root, train=False, transform=self.test_transforms
-        )
 
     def train_dataloader(self) -> DataLoader:
         return self.get_dataloader(self.train_set, mode="train")
@@ -146,7 +173,7 @@ if __name__ == "__main__":
     import os
 
     data_root = os.getenv("DATA_ROOT")
-    dm = TorchVisionDM(data_root=data_root, dataset="cifar10")
+    dm = TorchVisionDM(data_root=data_root, dataset="ecg5000", shape=[1, 140], transform_train="ecg_basic")
     dm.prepare_data()
     dm.setup()
     dm.train_set.label_randomly(6000)

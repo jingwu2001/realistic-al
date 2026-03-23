@@ -310,13 +310,18 @@ def normalize_features(
         feat_all = torch.cat([feat_labeled, feat_unlabeled], dim=0)
         min_all = torch.min(feat_all, dim=0)[0]
         max_all = torch.max(feat_all, dim=0)[0]
-        feat_labeled = (feat_labeled - min_all) / (max_all - min_all)
-        feat_unlabeled = (feat_unlabeled - min_all) / (max_all - min_all)
+        diff = max_all - min_all
+        # Protect against division by zero
+        diff[diff == 0] = 1.0
+        feat_labeled = (feat_labeled - min_all) / diff
+        feat_unlabeled = (feat_unlabeled - min_all) / diff
 
     elif normalization == 'zscore':
         feat_all = torch.cat([feat_labeled, feat_unlabeled], dim=0)
         mean_all = torch.mean(feat_all, dim=0)
         std_all  = torch.std(feat_all , dim=0)
+        # Protect against division by zero
+        std_all[std_all == 0] = 1.0
         feat_labeled = (feat_labeled - mean_all) / std_all
         feat_unlabeled = (feat_unlabeled - mean_all) / std_all
 
@@ -375,11 +380,19 @@ def calculate_extra_info(acq_size, sorted_scores):
     if isinstance(sorted_scores, torch.Tensor):
         sorted_scores = sorted_scores.detach().cpu().numpy()
     acquired = sorted_scores[:acq_size]
-    unacquried = sorted_scores[acq_size + 1:]
+    unacquried = sorted_scores[acq_size:]  # fixed off-by-one (was acq_size + 1)
 
     funcs = [np.max, np.min, np.median]
-    acquired_stats = np.array([func(acquired) for func in funcs])
-    unacquried_stats = np.array([func(unacquried) for func in funcs])
+    acquired_stats = (
+        np.array([func(acquired) for func in funcs])
+        if len(acquired) > 0
+        else np.full(len(funcs), np.nan)
+    )
+    unacquried_stats = (
+        np.array([func(unacquried) for func in funcs])
+        if len(unacquried) > 0
+        else np.full(len(funcs), np.nan)
+    )
 
     results = {
         "acq": acquired_stats,
@@ -440,6 +453,9 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
     print("K shape: ", K.shape)
     print("K_UL shape: ", K_UL.shape)
     print("K_LL shape: ", K_LL.shape)
+    if L < 15:
+        for i in K:
+            print(i)
 
     scores = torch.empty(U, device=DEVICE, dtype=torch.float64)
 

@@ -5,8 +5,8 @@ from launcher import ExperimentLauncher
 config_dict = {
     "model": "resnet",
     "query": [
-        # "bandit",
-        "vendi",
+        "bandit",
+        # "vendi",
         # "random",
         # "entropy",
         # "kcentergreedy",
@@ -15,7 +15,7 @@ config_dict = {
     ],
     "data": ["cifar10"],
     "active": [
-        # "cifar10_low",
+        "cifar10_low",
         "cifar10_med",
         # "cifar10_high",
     ],
@@ -23,15 +23,15 @@ config_dict = {
     # "query.vendi.kernel": ["rbf", "rbf", "rbf", "cosine"],
     "query.vendi.kernel": ["rbf"],
     # "query.vendi.gamma": [0.1, 1.0, 10.0, None],
-    "query.vendi.gamma": [10.0],
+    "query.vendi.gamma": [1.0],
     "query.vendi.normalization": ["minmax"],
 }
 
 hparam_dict = {
     # "data.val_size": [250, 2500, None],
-    "data.val_size": [2500],
-    # "trainer.seed": [12345, 12346, 12347],
-    "trainer.seed": [12345],
+    "data.val_size": [250, 2500],
+    "trainer.seed": [12345, 12346, 12347],
+    # "trainer.seed": [12345],
     "trainer.max_epochs": 200,
     "model.dropout_p": [0.5],
     "model.learning_rate": [0.1],
@@ -51,7 +51,7 @@ naming_conv = (
 joint_iteration = [
     ["active", "data.val_size"],
     ["query", "model.dropout_p"],
-    ["query.vendi.kernel", "query.vendi.gamma"],
+    # ["query.vendi.kernel", "query.vendi.gamma"],
 ]
 
 path_to_ex_file = "src/main.py"
