@@ -450,16 +450,12 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
     K = torch.empty(batch_size, L + 1, L + 1, device=DEVICE, dtype=torch.float64)
     K[:, :L, :L] = K_LL
     K[:, L, L] = 1.0
-    print("K shape: ", K.shape)
-    print("K_UL shape: ", K_UL.shape)
-    print("K_LL shape: ", K_LL.shape)
-    if L < 15:
-        for i in K:
-            print(i)
-
     scores = torch.empty(U, device=DEVICE, dtype=torch.float64)
 
-    num_iter = U // batch_size + 1
+    n_eig = int((L + 1) / 3) if vendi_cfg.approx else L + 1
+    eig_vals = torch.zeros(U, n_eig, device=DEVICE, dtype=torch.float64)
+
+    num_iter = math.ceil(U / batch_size)
     for i in tqdm(range(num_iter), desc="Calculating Vendi scores"):
         K_UL_batch = K_UL[batch_size * i: batch_size * (i + 1)]
         current_batch_size = K_UL_batch.shape[0]
@@ -468,10 +464,24 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
         K_batch[:, L, :L] = K_UL_batch
         K_batch[:, :L, L] = K_UL_batch
 
-        ev = torch.linalg.eigvalsh(K_batch) / (L + 1)
+        if vendi_cfg.approx:
+            k = int(K_batch.shape[1] / 3)
+            ev, _ = torch.lobpcg(K_batch, k=k)
+            ev = ev.clamp(min=0)
+            ev_sum = ev.sum(dim=1, keepdim=True)
+            ev = ev / ev_sum.clamp(min=1e-12)
+        else:
+            ev = torch.linalg.eigvalsh(K_batch).clamp(min=0) / (L + 1)
+        eig_vals[batch_size * i: batch_size * (i + 1)] = ev
         entropy = renyi_entropy(ev, q)
 
         scores[batch_size * i: batch_size * (i + 1)] = entropy
+
+    max_diff = (eig_vals.max(dim=0).values - eig_vals.min(dim=0).values).max().item()
+    if max_diff < 1e-8:
+        print("[WARNING] all samples have identical eigenvalue distributions — approximation may be degenerate.")
+    else:
+        print(f"[INFO] eigenvalue distributions: largest difference across samples = {max_diff:.6e}")
 
     del K, K_LL, K_UL
     torch.cuda.empty_cache()
