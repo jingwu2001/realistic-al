@@ -153,6 +153,8 @@ class BanditQuerySampler(QuerySampler):
         # Now we can compute mean_bald(Q_d): BALD scores of the diversity-selected samples
         mean_bald_Q_d = float(bald_scores_pool[acq_indices_vendi].mean())
 
+        vendi_state = _get_rng_states(device)
+
         set_dropout_p(model, original_p)
 
         # ------------------------------------------------------------------ #
@@ -193,11 +195,9 @@ class BanditQuerySampler(QuerySampler):
         context_features = np.stack([features_bald, features_vendi])  # (2, 6)
 
         # ------------------------------------------------------------------ #
-        # 5. Select arm                                                       #
+        # 5. Select arm and restore RNG to the end-state of the chosen method #
         # ------------------------------------------------------------------ #
         selected_arm = self.bandit_manager.select_arm(context_features)
-
-        vendi_state = _get_rng_states(device)
 
         if selected_arm == 0:  # BALD / uncertainty
             _set_rng_states(device, bald_state)
