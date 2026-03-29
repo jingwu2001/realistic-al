@@ -62,7 +62,7 @@ class ActiveTrainingLoop(object):
             elif "isic" in self.cfg.data.name:
                 monitor = "val/w_acc"
                 mode = "max"
-            elif self.cfg.data.name == "miotcd":
+            elif self.cfg.data.name in ["miotcd", "ecg5000"]:
                 monitor = "val/w_acc"
                 mode = "max"
             else:
@@ -88,7 +88,7 @@ class ActiveTrainingLoop(object):
             callbacks.append(pl.callbacks.EarlyStopping("val/acc", mode="max"))
         if self.cfg.data.name == "isic2016":
             callbacks.append(ISIC2016MetricCallback())
-        if self.cfg.data.name in ["isic2019", "miotcd"]:
+        if self.cfg.data.name in ["isic2019", "miotcd", "ecg5000"]:
             callbacks.append(
                 ImbClassMetricCallback(num_classes=self.cfg.data.num_classes)
             )

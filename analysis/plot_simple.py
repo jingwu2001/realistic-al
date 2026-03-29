@@ -1,6 +1,7 @@
 import sys
 import argparse
 import os
+import json
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -40,6 +41,10 @@ PALETTE = {
 SKIP_DIR = [
     'cifar10',
     'active-cifar10_high'
+]
+
+SKIP_REGIME = [
+    # 'active-ecg5000_high',
 ]
 
 granularity = "kernel"
@@ -92,6 +97,7 @@ def _load_regime(regime_dir, skip_before, skip_after, label_suffix, not_finished
     regime_name = regime_dir.name
     all_data = []
     aubc_results = []
+    runs_used = {}
 
     for exp_dir in regime_dir.iterdir():
         if not exp_dir.is_dir():
@@ -114,17 +120,24 @@ def _load_regime(regime_dir, skip_before, skip_after, label_suffix, not_finished
             method_name += f" {label_suffix}"
 
         seeds_data = []
-        valid_seed_dirs = sorted([d for d in exp_dir.iterdir() if d.is_dir()], key=lambda x: x.name)
-        for seed_dir in valid_seed_dirs[-3:]:
+        skip_before_time = datetime.datetime.strptime(skip_before, "%Y-%m-%d_%H-%M-%S-%f") if skip_before else None
+        skip_after_time = datetime.datetime.strptime(skip_after, "%Y-%m-%d_%H-%M-%S-%f") if skip_after else None
 
+        all_seed_dirs = sorted([d for d in exp_dir.iterdir() if d.is_dir()], key=lambda x: x.name)
+        filtered_seed_dirs = []
+        for d in all_seed_dirs:
             try:
-                run_time = datetime.datetime.strptime(seed_dir.name, "%Y-%m-%d_%H-%M-%S-%f")
-                skip_before_time = datetime.datetime.strptime(skip_before, "%Y-%m-%d_%H-%M-%S-%f") if skip_before else None
-                skip_after_time = datetime.datetime.strptime(skip_after, "%Y-%m-%d_%H-%M-%S-%f") if skip_after else None
+                run_time = datetime.datetime.strptime(d.name, "%Y-%m-%d_%H-%M-%S-%f")
                 if (skip_before_time and run_time < skip_before_time) or (skip_after_time and run_time > skip_after_time):
                     continue
             except ValueError:
                 pass
+            filtered_seed_dirs.append(d)
+
+        selected_seed_dirs = filtered_seed_dirs[-3:]
+        runs_used[method_name] = [str(d) for d in selected_seed_dirs]
+
+        for seed_dir in selected_seed_dirs:
 
             metric_file = seed_dir / "test_metrics.csv"
             if not metric_file.exists():
@@ -161,15 +174,19 @@ def _load_regime(regime_dir, skip_before, skip_after, label_suffix, not_finished
         if len(seeds_data) < 3:
             print(f"Warning: {method_name} has less than 3 seeds.")
 
-    return all_data, aubc_results
+    return all_data, aubc_results, runs_used
 
 
 def main(prefix, title, show_std=True):
     processed = []
     base_path = Path(args.results_path)
-    save_path = Path(args.save_path)
-    if not save_path.exists():
-        save_path.mkdir(parents=True)
+    run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = Path(args.save_path) / run_timestamp
+    save_path.mkdir(parents=True, exist_ok=True)
+    print(f"Output folder: {save_path}")
+
+    if args.note:
+        (save_path / "note.txt").write_text(args.note + "\n")
     not_finished = []
     no_df_found = []
     met_exceptions = []
@@ -180,17 +197,21 @@ def main(prefix, title, show_std=True):
             continue
 
         # --- Iterate over Label Regimes (e.g. active-cifar10_med) ---
-        for regime_dir in dataset_dir.iterdir():
-            if not regime_dir.is_dir() or regime_dir.name not in ["active-ecg5000_low", "active-ecg5000_10"]:
+        for regime_dir in sorted(dataset_dir.iterdir(), key=lambda x: x.name):
+            if not regime_dir.is_dir() or regime_dir.name in SKIP_REGIME or regime_dir.name in SKIP_DIR:
                 continue
             print(f"  {dataset_dir.name} / {regime_dir.name}")
             all_data = []
             aubc_results = []
 
-            d, a = _load_regime(regime_dir, args.skip_before, args.skip_after, "",
-                                not_finished, no_df_found, met_exceptions)
+            d, a, runs_used = _load_regime(regime_dir, args.skip_before, args.skip_after, "",
+                                           not_finished, no_df_found, met_exceptions)
             all_data.extend(d)
             aubc_results.extend(a)
+
+            runs_json_path = save_path / f"{prefix}_{dataset_dir.name}_{regime_dir.name}_runs.json"
+            with open(runs_json_path, "w") as f:
+                json.dump(runs_used, f, indent=2)
 
             print(f"  ALL_DATA: {len(all_data)} runs")
             if not all_data:
@@ -245,9 +266,6 @@ def main(prefix, title, show_std=True):
             #         current_palette[m] = other_colors[c_idx]
             #         c_idx += 1
 
-            print(f"DEBUG - current_palette: {current_palette}")
-            print(f"DEBUG - unique_methods: {unique_methods}")
-
             # --- Plotting Accuracy ---
             plt.figure(figsize=(10, 6))
             sns.lineplot(
@@ -292,58 +310,6 @@ def main(prefix, title, show_std=True):
             plt.close()
             print(f"  Saved bacc plot to {save_path / filename_bacc}")
 
-            # --- Selected Methods Plot (Accuracy) ---
-            # When granularity is 'kernel', base method names might be extended.
-            # So we select any method that starts with the base names.
-            base_selected_methods = ["Random", "BALD", "Vendi", "Bandit"]
-            selected_methods = [m for m in unique_methods if any(m.startswith(base) for base in base_selected_methods)]
-            selected_df = plot_df[plot_df["Method"].isin(selected_methods)]
-
-            if not selected_df.empty:
-                plt.figure(figsize=(10, 6))
-                sns.lineplot(
-                    data=selected_df,
-                    x="Cycle",
-                    y="Accuracy",
-                    hue="Method",
-                    palette=current_palette,
-                    ci="sd" if show_std else None,
-                    marker="o"
-                )
-                plt.title(f"{dataset_dir.name} - {regime_dir.name} - Accuracy - {title} (Selected)")
-                plt.ylabel("Test Accuracy")
-                plt.xlabel("Active Learning Cycle")
-                plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-                plt.tight_layout()
-
-                sel_filename = f"{filename.replace('_acc.png', '')}_selected_acc.png"
-                plt.savefig(save_path / sel_filename, dpi=300)
-                plt.close()
-                print(f"  Saved selected plot to {save_path / sel_filename}")
-
-            # --- Selected Methods Plot (Balanced Accuracy) ---
-            if not selected_df.empty:
-                plt.figure(figsize=(10, 6))
-                sns.lineplot(
-                    data=selected_df,
-                    x="Cycle",
-                    y="Balanced Accuracy",
-                    hue="Method",
-                    palette=current_palette,
-                    ci="sd" if show_std else None,
-                    marker="o"
-                )
-                plt.title(f"{dataset_dir.name} - {regime_dir.name} - Balanced Accuracy - {title} (Selected)")
-                plt.ylabel("Test Balanced Accuracy")
-                plt.xlabel("Active Learning Cycle")
-                plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-                plt.tight_layout()
-
-                sel_filename_bacc = f"{filename_bacc.replace('_bacc.png', '')}_selected_bacc.png"
-                plt.savefig(save_path / sel_filename_bacc, dpi=300)
-                plt.close()
-                print(f"  Saved selected bacc plot to {save_path / sel_filename_bacc}")
-
             # --- Save AUBC ---
             if aubc_results:
                 aubc_df = pd.DataFrame(aubc_results)
@@ -356,7 +322,7 @@ def main(prefix, title, show_std=True):
                 aubc_summary.to_csv(save_path / aubc_filename, index=False)
 
             processed.append(regime_dir)
-    sys.exit()
+
     print("processed:")
     print(processed)
 
@@ -388,9 +354,11 @@ if __name__ == "__main__":
     parser.add_argument("--skip-after", type=str, default=None,
                         help="Only include runs at or before this timestamp (YYYY-MM-DD_HH-MM-SS-ffffff). Overrides SKIP_AFTER.")
 
+    parser.add_argument("--note", type=str, default=None,
+                        help="Optional note saved as note.txt in the output folder.")
     parser.add_argument("--results-path", type=str, default="/home/jing/Desktop/realistic-al/experiments/activelearning",
                         help="Base path for the experiments.")
-    parser.add_argument("--save-path", type=str, default="./plots_simple",
+    parser.add_argument("--save-path", type=str, default="/home/jing/Desktop/realistic-al/analysis/plots_simple",
                         help="Path to save the plots.")
 
     args = parser.parse_args()

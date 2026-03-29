@@ -289,13 +289,16 @@ class AbstractClassifier(pl.LightningModule):
                     classes.append(y.numpy())
                 classes = np.concatenate(classes)
 
-            classes, class_weights = np.unique(classes, return_counts=True)
+            present_classes, class_counts = np.unique(classes, return_counts=True)
+            num_classes = getattr(dm, "num_classes", None)
+            if num_classes is None:
+                num_classes = self.hparams.data.num_classes
             # computation identical to sklearn balanced class weights
             # https://github.com/scikit-learn/scikit-learn/blob/36958fb24/sklearn/utils/class_weight.py#L10
-            class_weights = torch.tensor(
-                np.sum(class_weights) / (len(classes) * class_weights),
-                dtype=torch.float,
-            )
+            # Build weight vector over all classes; absent classes get weight 0
+            all_weights = np.zeros(num_classes, dtype=np.float64)
+            all_weights[present_classes] = np.sum(class_counts) / (len(present_classes) * class_counts)
+            class_weights = torch.tensor(all_weights, dtype=torch.float)
             self.loss_fct = nn.NLLLoss(weight=class_weights)
 
         # Lazily initialize metrics once num_classes is available.

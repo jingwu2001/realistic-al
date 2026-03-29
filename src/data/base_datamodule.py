@@ -65,7 +65,7 @@ class BaseDataModule(pl.LightningDataModule):
     def _split_dataset(self, dataset: Dataset, train: bool = True):
         """Splits the dataset into train and validation set."""
         len_dataset = len(dataset)  # type: ignore[arg-type]
-        splits = self._get_splits(len_dataset)
+        splits = self._get_splits(len_dataset) # get the number of train and val
         if self.random_split:
             dataset_train, dataset_val = random_split(
                 dataset, splits, generator=torch.Generator().manual_seed(self.seed)
@@ -96,6 +96,7 @@ class BaseDataModule(pl.LightningDataModule):
                 n_per_class = int(n_per_class)
                 for c in np.unique(labels):
                     class_indices = np.where(labels == c)[0]
+                    
                     indices.append(class_indices[:n_per_class])
                 indices = np.concatenate(indices, axis=0)
                 if self.dataset in ["isic2019", "miotcd"]:

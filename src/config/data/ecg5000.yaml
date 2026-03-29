@@ -1,7 +1,7 @@
 name: ecg5000
 shape: [1, 140]
 num_classes: 5
-val_split: 100
+val_split: 500
 mean: [0.0]
 std: [1.0]
 transform_train: ecg_basic

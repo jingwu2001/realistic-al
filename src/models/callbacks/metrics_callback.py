@@ -110,21 +110,21 @@ class ImbClassMetricCallback(MetricCallback):
         modes = ["train", "val", "test"]
         self.pred_dict = {}
         self.pred_conf = {
-            mode: ConfusionMatrix(num_classes=num_classes, normalize=None)
+            mode: ConfusionMatrix(task="multiclass", num_classes=num_classes, normalize=None)
             for mode in modes
         }
 
         self.auc_dict = {}
         self.auc_dict.update(
             {
-                f"{mode}/auroc": AUROC(num_classes=num_classes, mode="macro")
+                f"{mode}/auroc": AUROC(task="multiclass", num_classes=num_classes, average="macro")
                 for mode in modes
             }
         )
         self.auc_dict.update(
             {
                 f"{mode}/av_prec": AveragePrecision(
-                    num_classes=num_classes, mode="macro"
+                    task="multiclass", num_classes=num_classes, average="macro"
                 )
                 for mode in modes
             }
@@ -153,6 +153,7 @@ class ImbClassMetricCallback(MetricCallback):
         ).mean()
 
         out_dict = {
+            f"{mode}/acc": acc,
             f"{mode}/w_acc": w_acc,
             f"{mode}/av_prec": av_prec,
             f"{mode}/av_f1": av_f1,
@@ -241,9 +242,9 @@ class ISIC2016MetricCallback(MetricCallback):
         """Callback which creates and tracks the torchmetrics AUROC and Average Prescision."""
         super().__init__()
         modes = ["train", "val", "test"]
-        self.auc_dict = {f"{mode}/auroc": AUROC(num_classes=2) for mode in modes}
+        self.auc_dict = {f"{mode}/auroc": AUROC(task="binary") for mode in modes}
         self.auc_dict.update(
-            {f"{mode}/av_prec": AveragePrecision(num_classes=2) for mode in modes}
+            {f"{mode}/av_prec": AveragePrecision(task="binary") for mode in modes}
         )
         self.pred_dict = {}
         self.pred_conf = {}

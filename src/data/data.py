@@ -12,6 +12,7 @@ from data.ecg5000_dataset import ECG5000Dataset
 
 from .active import ActiveLearningDataset
 from .base_datamodule import BaseDataModule
+from .utils import ActiveSubset
 from .longtail import create_imbalanced_dataset
 from .skin_dataset import ISIC2016, ISIC2019
 from .transformations import get_transform
@@ -111,26 +112,48 @@ class TorchVisionDM(BaseDataModule):
 
     def _setup_datasets(self):
         """Creates the active training dataset and validation and test datasets"""
-        try:
-            if self.dataset == "ecg5000":
-                self.dataset_cls(root=self.data_root) # does not take download args
-            else:
+        # For ECG5000: stratified 3-way split so that test, val, and pool all have
+        # roughly the same class distribution (and at least 1 sample per class).
+        if self.dataset == "ecg5000":
+            _ecg_test_size = 1000
+            _ecg_val_size  = (self.val_split if isinstance(self.val_split, int)
+                              else int(self.val_split * 5000))
+            _ecg_root_tmp  = os.path.join(self.data_root, "ecg5000")
+            _ecg_labels    = self.dataset_cls(root=_ecg_root_tmp, split="all").targets
+            _ecg_n_total   = len(_ecg_labels)
+            _ecg_rng       = np.random.default_rng(self.seed)
+            _ecg_test_idx, _ecg_val_idx, _ecg_pool_idx = [], [], []
+            for c in np.unique(_ecg_labels):
+                c_idx  = np.where(_ecg_labels == c)[0]
+                _ecg_rng.shuffle(c_idx)
+                n_test = max(1, round(len(c_idx) * _ecg_test_size / _ecg_n_total))
+                n_val  = max(1, round(len(c_idx) * _ecg_val_size  / _ecg_n_total))
+                _ecg_test_idx.append(c_idx[:n_test])
+                _ecg_val_idx.append( c_idx[n_test:n_test + n_val])
+                _ecg_pool_idx.append(c_idx[n_test + n_val:])
+            _ecg_test_idx = np.concatenate(_ecg_test_idx)
+            _ecg_val_idx  = np.concatenate(_ecg_val_idx)
+            _ecg_pool_idx = np.concatenate(_ecg_pool_idx)
+
+        if self.dataset != "ecg5000":
+            try:
                 self.dataset_cls(root=self.data_root, download=False)
-        except:  # Error is assumed here to stem from data not being present.
-            # Download the TorchVision Dataset
-            if self.dataset != "ecg5000":
+            except:  # Error is assumed here to stem from data not being present.
+                # Download the TorchVision Dataset
                 self.dataset_cls(root=self.data_root, download=True)
             
         if self.dataset == "ecg5000":
             ecg_root = os.path.join(self.data_root, "ecg5000")
-            self.train_set = self.dataset_cls(
-                root=ecg_root, split="train", transform=self.train_transforms
+            _ecg_full_train = self.dataset_cls(
+                root=ecg_root, split="all", transform=self.train_transforms
             )
+            self.train_set = ActiveSubset(_ecg_full_train, _ecg_pool_idx)
         else:
             self.train_set = self.dataset_cls(
                 self.data_root, train=True, transform=self.train_transforms
             )
-        self.train_set = self._split_dataset(self.train_set, train=True)
+        if self.dataset != "ecg5000":
+            self.train_set = self._split_dataset(self.train_set, train=True)
 
         if self.imbalance:
             self.train_set = create_imbalanced_dataset(
@@ -144,12 +167,11 @@ class TorchVisionDM(BaseDataModule):
 
         if self.dataset == "ecg5000":
             ecg_root = os.path.join(self.data_root, "ecg5000")
-            self.val_set = self.dataset_cls(
-                root=ecg_root, split="train", transform=self.test_transforms
+            _ecg_full_eval = self.dataset_cls(
+                root=ecg_root, split="all", transform=self.test_transforms
             )
-            self.test_set = self.dataset_cls(
-                root=ecg_root, split="test", transform=self.test_transforms
-            )
+            self.val_set  = Subset(_ecg_full_eval, _ecg_val_idx)
+            self.test_set = Subset(_ecg_full_eval, _ecg_test_idx)
         else:
             self.val_set = self.dataset_cls(
                 self.data_root, train=True, transform=self.test_transforms
@@ -157,7 +179,8 @@ class TorchVisionDM(BaseDataModule):
             self.test_set = self.dataset_cls(
                 self.data_root, train=False, transform=self.test_transforms
             )
-        self.val_set = self._split_dataset(self.val_set, train=False)
+        if self.dataset != "ecg5000":
+            self.val_set = self._split_dataset(self.val_set, train=False)
 
     def train_dataloader(self) -> DataLoader:
         return self.get_dataloader(self.train_set, mode="train")

@@ -7,24 +7,24 @@ config_dict = {
     "query": [
         "bandit",
         "vendi",
-        # "random",
-        # "entropy",
-        # "kcentergreedy",
-        # "bald",
-        # "badge",
+        "random",
+        "entropy",
+        "kcentergreedy",
+        "bald",
+        "badge",
     ],
     "data": ["ecg5000"],
     "active": [
         "ecg5000_low",
-        # "ecg5000_med",
+        "ecg5000_med",
         "ecg5000_10",
-        # "ecg5000_high", # not enough samples
+        "ecg5000_high", # not enough samples
     ],
     "optim": ["adam"],
 }
 
 hparam_dict = {
-    "data.val_size": [100] * len(config_dict['active']),
+    "data.val_size": [500] * len(config_dict['active']),
     "trainer.seed": [12345, 12346, 12347],
     "trainer.max_epochs": 17,
     "model.dropout_p": [0.5] * len(config_dict['query']),
@@ -32,9 +32,11 @@ hparam_dict = {
     "trainer.precision": 32,
     "trainer.batch_size": 8,
     "trainer.deterministic": True,
+    "model.weighted_loss": True,
     "query.vendi.kernel": "rbf",
     "query.vendi.gamma": 1.0,
     "query.vendi.normalization": "minmax",
+    "query.bandit.num_classes": 5,
 }
 naming_conv = (
     "{data}/active-{active}/basic_model-{model}_acq-{query}_ep-{trainer.max_epochs}"

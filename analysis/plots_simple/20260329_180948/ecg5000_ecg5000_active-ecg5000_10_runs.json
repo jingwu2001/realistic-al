@@ -1,0 +1,37 @@
+{
+  "Entropy": [
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-entropy_ep-17/2026-03-25_16-11-27-183081",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-entropy_ep-17/2026-03-25_16-13-26-581504",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-entropy_ep-17/2026-03-25_16-15-26-916714"
+  ],
+  "Vendi": [
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-vendi_ep-17/2026-03-25_14-31-34-469748",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-vendi_ep-17/2026-03-25_14-34-12-495532",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-vendi_ep-17/2026-03-25_14-36-50-585632"
+  ],
+  "Bandit": [
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-bandit_ep-17/2026-03-25_13-10-33-945147",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-bandit_ep-17/2026-03-25_13-13-31-727896",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-bandit_ep-17/2026-03-25_13-16-31-131782"
+  ],
+  "Random": [
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-random_ep-17/2026-03-25_15-36-10-056948",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-random_ep-17/2026-03-25_15-38-01-947389",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-random_ep-17/2026-03-25_15-39-54-368859"
+  ],
+  "BADGE": [
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-badge_ep-17/2026-03-25_18-01-46-696773",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-badge_ep-17/2026-03-25_18-03-50-445706",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-badge_ep-17/2026-03-25_18-05-54-480021"
+  ],
+  "Core-Set": [
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-kcentergreedy_ep-17/2026-03-25_16-47-58-881965",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-kcentergreedy_ep-17/2026-03-25_16-50-04-859112",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-kcentergreedy_ep-17/2026-03-25_16-52-10-711872"
+  ],
+  "BALD": [
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-bald_ep-17/2026-03-25_17-25-03-879798",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-bald_ep-17/2026-03-25_17-27-04-805576",
+    "/home/jing/Desktop/realistic-al/experiments/activelearning/ecg5000/active-ecg5000_10/basic_model-inception_time_acq-bald_ep-17/2026-03-25_17-29-06-754153"
+  ]
+}
