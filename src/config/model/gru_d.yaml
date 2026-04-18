@@ -1,0 +1,17 @@
+name: gru_d
+# Must equal data.shape[1] (number of clinical variables for P12 = 33).
+# GRU-D requires hidden_size == input_size.
+hidden_size: 33
+weight_decay: 1.0e-5
+learning_rate: 0.001
+# MC-dropout probability applied to the classification head.
+dropout_p: 0.5
+load_pretrained: Null
+freeze_encoder: False
+use_ema: False
+exclude_bn_bias: False
+# Number of MC forward passes used for uncertainty estimation.
+k: 10
+finetune: False
+small_head: False
+weighted_loss: False

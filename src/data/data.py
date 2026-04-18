@@ -9,6 +9,7 @@ from torchvision.datasets import CIFAR10, CIFAR100, MNIST, FashionMNIST
 
 from data.mio_dataset import MIOTCDDataset
 from data.ecg5000_dataset import ECG5000Dataset
+from data.p12_dataset import P12Dataset
 
 from .active import ActiveLearningDataset
 from .base_datamodule import BaseDataModule
@@ -70,12 +71,15 @@ class TorchVisionDM(BaseDataModule):
         self.mean = mean
         self.std = std
         self.shape = shape
-        if len(shape) == 3:
-            assert shape[-1] == len(mean)
-            assert shape[-1] == len(std)
-        else:
-            assert shape[0] == len(mean)
-            assert shape[0] == len(std)
+        # P12 and ECG5000 manage their own normalisation; skip the mean/std
+        # shape assertion that is only meaningful for image-style transforms.
+        if dataset not in ("ecg5000", "p12"):
+            if len(shape) == 3:
+                assert shape[-1] == len(mean)
+                assert shape[-1] == len(std)
+            else:
+                assert shape[0] == len(mean)
+                assert shape[0] == len(std)
 
         self.train_transforms = get_transform(
             transform_train, self.mean, self.std, self.shape
@@ -103,6 +107,8 @@ class TorchVisionDM(BaseDataModule):
             self.dataset_cls = MIOTCDDataset
         elif self.dataset == "ecg5000":
             self.dataset_cls = ECG5000Dataset
+        elif self.dataset == "p12":
+            self.dataset_cls = P12Dataset
         else:
             raise NotImplementedError
         self._setup_datasets()
@@ -110,10 +116,28 @@ class TorchVisionDM(BaseDataModule):
         if not self.shuffle:
             raise ValueError("shuffle flag has to be set to true")
 
+    def _stratified_3way_split(self, labels, n_total, test_size, val_size):
+        """Return (test_idx, val_idx, pool_idx) with stratification by class label."""
+        rng = np.random.default_rng(self.seed)
+        test_idx, val_idx, pool_idx = [], [], []
+        for c in np.unique(labels):
+            c_idx = np.where(labels == c)[0]
+            rng.shuffle(c_idx)
+            n_test = max(1, round(len(c_idx) * test_size / n_total))
+            n_val  = max(1, round(len(c_idx) * val_size  / n_total))
+            test_idx.append(c_idx[:n_test])
+            val_idx.append( c_idx[n_test:n_test + n_val])
+            pool_idx.append(c_idx[n_test + n_val:])
+        return (np.concatenate(test_idx),
+                np.concatenate(val_idx),
+                np.concatenate(pool_idx))
+
     def _setup_datasets(self):
         """Creates the active training dataset and validation and test datasets"""
-        # For ECG5000: stratified 3-way split so that test, val, and pool all have
-        # roughly the same class distribution (and at least 1 sample per class).
+        # ------------------------------------------------------------------ #
+        # Pre-compute stratified split indices for datasets that don't ship   #
+        # with their own train/test files (ECG5000, P12).                     #
+        # ------------------------------------------------------------------ #
         if self.dataset == "ecg5000":
             _ecg_test_size = 1000
             _ecg_val_size  = (self.val_split if isinstance(self.val_split, int)
@@ -121,38 +145,47 @@ class TorchVisionDM(BaseDataModule):
             _ecg_root_tmp  = os.path.join(self.data_root, "ecg5000")
             _ecg_labels    = self.dataset_cls(root=_ecg_root_tmp, split="all").targets
             _ecg_n_total   = len(_ecg_labels)
-            _ecg_rng       = np.random.default_rng(self.seed)
-            _ecg_test_idx, _ecg_val_idx, _ecg_pool_idx = [], [], []
-            for c in np.unique(_ecg_labels):
-                c_idx  = np.where(_ecg_labels == c)[0]
-                _ecg_rng.shuffle(c_idx)
-                n_test = max(1, round(len(c_idx) * _ecg_test_size / _ecg_n_total))
-                n_val  = max(1, round(len(c_idx) * _ecg_val_size  / _ecg_n_total))
-                _ecg_test_idx.append(c_idx[:n_test])
-                _ecg_val_idx.append( c_idx[n_test:n_test + n_val])
-                _ecg_pool_idx.append(c_idx[n_test + n_val:])
-            _ecg_test_idx = np.concatenate(_ecg_test_idx)
-            _ecg_val_idx  = np.concatenate(_ecg_val_idx)
-            _ecg_pool_idx = np.concatenate(_ecg_pool_idx)
+            _ecg_test_idx, _ecg_val_idx, _ecg_pool_idx = self._stratified_3way_split(
+                _ecg_labels, _ecg_n_total, _ecg_test_size, _ecg_val_size
+            )
 
-        if self.dataset != "ecg5000":
+        if self.dataset == "p12":
+            _p12_root       = os.path.join(self.data_root, "p12")
+            _p12_labels     = self.dataset_cls(root=_p12_root).targets
+            _p12_n_total    = len(_p12_labels)
+            _p12_test_size  = max(1, round(0.1 * _p12_n_total))
+            _p12_val_size   = (self.val_split if isinstance(self.val_split, int)
+                               else max(1, round(self.val_split * _p12_n_total)))
+            _p12_test_idx, _p12_val_idx, _p12_pool_idx = self._stratified_3way_split(
+                _p12_labels, _p12_n_total, _p12_test_size, _p12_val_size
+            )
+
+        # ------------------------------------------------------------------ #
+        # For standard TorchVision datasets, ensure they are downloaded.      #
+        # ------------------------------------------------------------------ #
+        if self.dataset not in ("ecg5000", "p12"):
             try:
                 self.dataset_cls(root=self.data_root, download=False)
             except:  # Error is assumed here to stem from data not being present.
-                # Download the TorchVision Dataset
                 self.dataset_cls(root=self.data_root, download=True)
-            
+
+        # ------------------------------------------------------------------ #
+        # Build train (pool) set                                               #
+        # ------------------------------------------------------------------ #
         if self.dataset == "ecg5000":
             ecg_root = os.path.join(self.data_root, "ecg5000")
             _ecg_full_train = self.dataset_cls(
                 root=ecg_root, split="all", transform=self.train_transforms
             )
             self.train_set = ActiveSubset(_ecg_full_train, _ecg_pool_idx)
+        elif self.dataset == "p12":
+            _p12_full = self.dataset_cls(root=_p12_root)
+            self.train_set = ActiveSubset(_p12_full, _p12_pool_idx)
         else:
             self.train_set = self.dataset_cls(
                 self.data_root, train=True, transform=self.train_transforms
             )
-        if self.dataset != "ecg5000":
+        if self.dataset not in ("ecg5000", "p12"):
             self.train_set = self._split_dataset(self.train_set, train=True)
 
         if self.imbalance:
@@ -165,6 +198,9 @@ class TorchVisionDM(BaseDataModule):
                 self.train_set, pool_specifics={"transform": self.test_transforms}
             )
 
+        # ------------------------------------------------------------------ #
+        # Build val / test sets                                                #
+        # ------------------------------------------------------------------ #
         if self.dataset == "ecg5000":
             ecg_root = os.path.join(self.data_root, "ecg5000")
             _ecg_full_eval = self.dataset_cls(
@@ -172,6 +208,10 @@ class TorchVisionDM(BaseDataModule):
             )
             self.val_set  = Subset(_ecg_full_eval, _ecg_val_idx)
             self.test_set = Subset(_ecg_full_eval, _ecg_test_idx)
+        elif self.dataset == "p12":
+            _p12_full_eval = self.dataset_cls(root=_p12_root)
+            self.val_set   = Subset(_p12_full_eval, _p12_val_idx)
+            self.test_set  = Subset(_p12_full_eval, _p12_test_idx)
         else:
             self.val_set = self.dataset_cls(
                 self.data_root, train=True, transform=self.test_transforms
@@ -179,7 +219,7 @@ class TorchVisionDM(BaseDataModule):
             self.test_set = self.dataset_cls(
                 self.data_root, train=False, transform=self.test_transforms
             )
-        if self.dataset != "ecg5000":
+        if self.dataset not in ("ecg5000", "p12"):
             self.val_set = self._split_dataset(self.val_set, train=False)
 
     def train_dataloader(self) -> DataLoader:
@@ -193,44 +233,86 @@ class TorchVisionDM(BaseDataModule):
 
 
 if __name__ == "__main__":
+    # Run from the src/ directory as a module to keep imports working:
+    #   cd src && python -m data.data
     import os
-
     data_root = os.getenv("DATA_ROOT")
-    dm = TorchVisionDM(data_root=data_root, dataset="ecg5000", shape=[1, 140], transform_train="ecg_basic")
-    dm.prepare_data()
-    dm.setup()
-    dm.train_set.label_randomly(6000)
-    train_loader = dm.train_dataloader()
-    labeled_loader = dm.labeled_dataloader()
-    pool_loader = dm.pool_dataloader()
+    assert data_root, "Set the DATA_ROOT environment variable first."
 
-    # import matplotlib.pyplot as plt
-    # import torchvision
+    def _check_dm(name, dm, n_label):
+        """Run a standard set of assertions on a freshly built datamodule."""
+        print(f"\n{'='*50}\n  Dataset: {name}\n{'='*50}")
 
-    # def vis_first_batch(loader):
-    #     x = next(iter(loader))[0]
-    #     x = x - x.min()
-    #     x = x / x.max()
-    #     vis = torchvision.utils.make_grid(x).permute(1, 2, 0)
-    #     plt.imshow(vis)
-    #     plt.show()
+        dm.train_set.label_randomly(n_label)
 
-    from tqdm.auto import tqdm
+        # Sizes
+        print(f"  Pool    : {len(dm.train_set.pool)}")
+        print(f"  Labeled : {dm.train_set.n_labelled}")
+        print(f"  Val     : {len(dm.val_set)}")
+        print(f"  Test    : {len(dm.test_set)}")
 
-    # print("Iterating over Labelled Training Set")
-    # for x in tqdm(train_loader):
-    #     pass
-    # print("Iterating over Unlabelled Pool of Data")
-    # for y in tqdm(DataLoader(dm.train_set.pool, batch_size=64)):
-    #     pass
-    # print("Iterating over the Validation Dataset")
-    # val_loader = dm.val_dataloader()
-    # for x in tqdm(val_loader):
-    #     pass
+        # Dataloaders
+        train_loader  = dm.train_dataloader()
+        val_loader    = dm.val_dataloader()
+        test_loader   = dm.test_dataloader()
+        pool_loader   = dm.pool_dataloader()
 
-    pool_loader = dm.pool_dataloader(m=20)
-    inds = np.array([i for i in range(10)])
-    pool_indices = dm.get_pool_indices(inds)
-    assert np.array_equal(pool_indices, dm.indices[: len(pool_indices)])
+        xb, yb = next(iter(train_loader))
+        print(f"  Train batch x: {tuple(xb.shape)}  y: {tuple(yb.shape)}")
+        assert xb.dtype == torch.float32, "x must be float32"
+        assert yb.dtype == torch.int64,   "y must be int64"
 
-    print(pool_indices)
+        xb, yb = next(iter(val_loader))
+        print(f"  Val   batch x: {tuple(xb.shape)}  y: {tuple(yb.shape)}")
+
+        xb, yb = next(iter(test_loader))
+        print(f"  Test  batch x: {tuple(xb.shape)}  y: {tuple(yb.shape)}")
+
+        xb, yb = next(iter(pool_loader))
+        print(f"  Pool  batch x: {tuple(xb.shape)}  y: {tuple(yb.shape)}")
+
+        # Pool index round-trip
+        dm.pool_dataloader(m=20)
+        inds = np.arange(10)
+        inds_mapped = dm.get_pool_indices(inds)
+        assert np.array_equal(inds_mapped, dm.indices[: len(inds_mapped)])
+        print(f"  Pool index round-trip: OK")
+        print(f"  {name} OK")
+
+    # ------------------------------------------------------------------ #
+    # ECG5000                                                              #
+    # ------------------------------------------------------------------ #
+    dm_ecg = TorchVisionDM(
+        data_root=data_root,
+        dataset="ecg5000",
+        shape=[1, 140],
+        num_classes=5,
+        mean=[0.0],
+        std=[1.0],
+        transform_train="ecg_basic",
+        transform_test="basic",
+        batch_size=64,
+        num_workers=0,
+        persistent_workers=False,
+    )
+    _check_dm("ECG5000", dm_ecg, n_label=200)
+
+    # ------------------------------------------------------------------ #
+    # P12                                                                  #
+    # ------------------------------------------------------------------ #
+    dm_p12 = TorchVisionDM(
+        data_root=data_root,
+        dataset="p12",
+        shape=[3, 33, 49],
+        num_classes=2,
+        mean=[0.0],
+        std=[1.0],
+        transform_train="basic",
+        transform_test="basic",
+        batch_size=64,
+        num_workers=0,
+        persistent_workers=False,
+    )
+    _check_dm("P12", dm_p12, n_label=200)
+
+    print("\nAll checks passed.")

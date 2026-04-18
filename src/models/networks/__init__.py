@@ -4,5 +4,6 @@ from .bayesian_resnet import *
 from .bayesian_vgg import *
 from .bayesian_wide_resnet import *
 from .bayesian_inception_time import *
+from .gru_d import *
 from .build import build_model
 from .registry import *

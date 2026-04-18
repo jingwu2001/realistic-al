@@ -1,0 +1,18 @@
+name: p12
+# Tensor layout per sample: (3, 33, 49) = (X/Mask/Delta, features, timesteps)
+shape: [3, 33, 49]
+num_classes: 2
+# 10 % of data reserved for validation (float) or an absolute integer count
+val_split: 0.1
+# mean/std placeholders — P12 data is already normalised by the prep script
+mean: [0.0]
+std: [1.0]
+transform_train: basic
+transform_test: basic
+# Path to the per-feature means produced by GRU-D_data_preparation.py.
+# Loaded by the gru_d model factory to initialise the imputation baseline.
+x_mean_path: ${oc.env:DATA_ROOT}/p12/x_mean_aft_nor.npy
+# Balanced sampling: oversample the minority class (died, ~14%) so each
+# training batch is roughly 50/50.  Critical for P12's 86/14 imbalance —
+# without this, the model collapses to always predicting "survived".
+balanced_sampling: true
