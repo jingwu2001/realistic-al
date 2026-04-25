@@ -108,6 +108,7 @@ class ImbClassMetricCallback(MetricCallback):
         """
         super().__init__()
         modes = ["train", "val", "test"]
+        self.binary = num_classes == 2
         self.pred_dict = {}
         self.pred_conf = {
             mode: ConfusionMatrix(task="multiclass", num_classes=num_classes, normalize=None)
@@ -115,20 +116,24 @@ class ImbClassMetricCallback(MetricCallback):
         }
 
         self.auc_dict = {}
-        self.auc_dict.update(
-            {
-                f"{mode}/auroc": AUROC(task="multiclass", num_classes=num_classes, average="macro")
-                for mode in modes
-            }
-        )
-        self.auc_dict.update(
-            {
-                f"{mode}/av_prec": AveragePrecision(
-                    task="multiclass", num_classes=num_classes, average="macro"
-                )
-                for mode in modes
-            }
-        )
+        if self.binary:
+            self.auc_dict.update({f"{mode}/auroc": AUROC(task="binary") for mode in modes})
+            self.auc_dict.update({f"{mode}/auprc": AveragePrecision(task="binary") for mode in modes})
+        else:
+            self.auc_dict.update(
+                {
+                    f"{mode}/auroc": AUROC(task="multiclass", num_classes=num_classes, average="macro")
+                    for mode in modes
+                }
+            )
+            self.auc_dict.update(
+                {
+                    f"{mode}/auprc": AveragePrecision(
+                        task="multiclass", num_classes=num_classes, average="macro"
+                    )
+                    for mode in modes
+                }
+            )
 
     def compute_pred_metrics(
         self, mode: str, class_wise: bool = False
@@ -202,8 +207,9 @@ class ImbClassMetricCallback(MetricCallback):
         logprob = outputs["logprob"]
         y = outputs["label"]
         pred = torch.argmax(logprob, dim=-1)
+        probs = torch.exp(logprob)
         self.update_metric_dict(self.pred_conf, mode, pred.to("cpu"), y.to("cpu"))
-        self.update_metric_dict(self.auc_dict, mode, torch.exp(logprob), y)
+        self.update_metric_dict(self.auc_dict, mode, probs[:, 1] if self.binary else probs, y)
 
     def on_validation_batch_end(
         self, trainer, pl_module, outputs, batch, batch_idx, unused: int = 0
@@ -217,8 +223,9 @@ class ImbClassMetricCallback(MetricCallback):
         mode = "val"
         logprob, y = outputs
         pred = torch.argmax(logprob, dim=-1)
+        probs = torch.exp(logprob)
         self.update_metric_dict(self.pred_conf, mode, pred.to("cpu"), y.to("cpu"))
-        self.update_metric_dict(self.auc_dict, mode, torch.exp(logprob), y)
+        self.update_metric_dict(self.auc_dict, mode, probs[:, 1] if self.binary else probs, y)
 
     def on_test_batch_end(
         self, trainer, pl_module, outputs, batch, batch_idx, unused: int = 0
@@ -232,8 +239,9 @@ class ImbClassMetricCallback(MetricCallback):
         mode = "test"
         logprob, y = outputs
         pred = torch.argmax(logprob, dim=-1)
+        probs = torch.exp(logprob)
         self.update_metric_dict(self.pred_conf, mode, pred.to("cpu"), y.to("cpu"))
-        self.update_metric_dict(self.auc_dict, mode, torch.exp(logprob), y)
+        self.update_metric_dict(self.auc_dict, mode, probs[:, 1] if self.binary else probs, y)
 
 
 # This code is not used in benchmark, but maybe it is useful for some people.
@@ -244,7 +252,7 @@ class ISIC2016MetricCallback(MetricCallback):
         modes = ["train", "val", "test"]
         self.auc_dict = {f"{mode}/auroc": AUROC(task="binary") for mode in modes}
         self.auc_dict.update(
-            {f"{mode}/av_prec": AveragePrecision(task="binary") for mode in modes}
+            {f"{mode}/auprc": AveragePrecision(task="binary") for mode in modes}
         )
         self.pred_dict = {}
         self.pred_conf = {}

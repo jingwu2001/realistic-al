@@ -1,0 +1,24 @@
+name: transformer
+# --- Architecture ---
+d_inp: 36          # P12 time-series features
+d_model: 64        # transformer embedding / hidden dimension
+nhead: 4           # attention heads (d_model must be divisible by nhead)
+nhid: 128          # feedforward network hidden dimension
+nlayers: 2         # number of transformer encoder layers
+max_len: 215       # positional-encoding scaling base (= max sequence length)
+d_static: 9        # P12 extended_static dimension
+MAX: 10000         # positional-encoding period constant
+# --- Bayesian ---
+dropout_p: 0.5     # MC-dropout applied to both transformer FFN and the head
+k: 10              # MC forward passes for uncertainty estimation
+# --- Optimiser ---
+weight_decay: 1.0e-5
+learning_rate: 0.001
+# --- Framework flags ---
+use_ema: False
+exclude_bn_bias: False
+small_head: False
+weighted_loss: False
+load_pretrained: Null
+freeze_encoder: False
+finetune: False

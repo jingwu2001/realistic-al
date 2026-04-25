@@ -1,0 +1,27 @@
+name: transformer2
+# --- Architecture ---
+d_inp: 36          # P12 time-series features
+d_model: 64        # kept for API parity; encoder dim = 16 (PE) + 36 (features) = 52
+nhead: 4           # must divide (d_pe + d_inp) = 52 → use 4 (52/4 = 13)
+nhid: 128          # feedforward network hidden dimension
+nlayers: 2         # number of transformer encoder layers
+max_len: 215       # positional-encoding scaling base
+d_static: 9        # P12 extended_static dimension
+MAX: 10000         # positional-encoding period constant
+perc: 0.25         # percentile (unused, kept for API parity)
+aggreg: mean       # pooling: mean or max
+use_static: True   # concatenate static embedding to pooled output
+# --- Bayesian ---
+dropout_p: 0.5
+k: 10
+# --- Optimiser ---
+weight_decay: 1.0e-5
+learning_rate: 0.001
+# --- Framework flags ---
+use_ema: False
+exclude_bn_bias: False
+small_head: False
+weighted_loss: False
+load_pretrained: Null
+freeze_encoder: False
+finetune: False

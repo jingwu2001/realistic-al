@@ -160,9 +160,10 @@ def _get_var_ratios(pt_model: torch.nn.Module):
 
 
 def _get_random_fct():
-    def acq_random(x: torch.Tensor, c: float = 0.0001):
+    def acq_random(x, c: float = 0.0001):
         """Returns random values over the interval [0, c)"""
-        out = torch.rand(x.shape[0], device=x.device) * c
+        x0 = x[0] if isinstance(x, (list, tuple)) else x
+        out = torch.rand(x0.shape[0], device=x0.device) * c
         return out
 
     return acq_random
@@ -214,7 +215,10 @@ def acq_from_batch(
         np.ndarray: outputs of function for batch inputs.
     """
     x, y = batch
-    x = x.to(device)
+    if isinstance(x, (list, tuple)):
+        x = [t.to(device) if isinstance(t, torch.Tensor) else t for t in x]
+    else:
+        x = x.to(device)
     out = function(x)
     out = to_numpy(out)
     return out

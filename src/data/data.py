@@ -9,7 +9,7 @@ from torchvision.datasets import CIFAR10, CIFAR100, MNIST, FashionMNIST
 
 from data.mio_dataset import MIOTCDDataset
 from data.ecg5000_dataset import ECG5000Dataset
-from data.p12_dataset import P12Dataset
+from data.p12_dataset import P12Dataset, P12TransformerDataset
 
 from .active import ActiveLearningDataset
 from .base_datamodule import BaseDataModule
@@ -73,7 +73,7 @@ class TorchVisionDM(BaseDataModule):
         self.shape = shape
         # P12 and ECG5000 manage their own normalisation; skip the mean/std
         # shape assertion that is only meaningful for image-style transforms.
-        if dataset not in ("ecg5000", "p12"):
+        if dataset not in ("ecg5000", "p12", "p12_transformer"):
             if len(shape) == 3:
                 assert shape[-1] == len(mean)
                 assert shape[-1] == len(std)
@@ -109,6 +109,8 @@ class TorchVisionDM(BaseDataModule):
             self.dataset_cls = ECG5000Dataset
         elif self.dataset == "p12":
             self.dataset_cls = P12Dataset
+        elif self.dataset == "p12_transformer":
+            self.dataset_cls = P12TransformerDataset
         else:
             raise NotImplementedError
         self._setup_datasets()
@@ -149,8 +151,8 @@ class TorchVisionDM(BaseDataModule):
                 _ecg_labels, _ecg_n_total, _ecg_test_size, _ecg_val_size
             )
 
-        if self.dataset == "p12":
-            _p12_root       = os.path.join(self.data_root, "p12")
+        if self.dataset in ("p12", "p12_transformer"):
+            _p12_root       = os.path.join(self.data_root, "P12data/processed_data")
             _p12_labels     = self.dataset_cls(root=_p12_root).targets
             _p12_n_total    = len(_p12_labels)
             _p12_test_size  = max(1, round(0.1 * _p12_n_total))
@@ -163,7 +165,7 @@ class TorchVisionDM(BaseDataModule):
         # ------------------------------------------------------------------ #
         # For standard TorchVision datasets, ensure they are downloaded.      #
         # ------------------------------------------------------------------ #
-        if self.dataset not in ("ecg5000", "p12"):
+        if self.dataset not in ("ecg5000", "p12", "p12_transformer"):
             try:
                 self.dataset_cls(root=self.data_root, download=False)
             except:  # Error is assumed here to stem from data not being present.
@@ -178,14 +180,14 @@ class TorchVisionDM(BaseDataModule):
                 root=ecg_root, split="all", transform=self.train_transforms
             )
             self.train_set = ActiveSubset(_ecg_full_train, _ecg_pool_idx)
-        elif self.dataset == "p12":
+        elif self.dataset in ("p12", "p12_transformer"):
             _p12_full = self.dataset_cls(root=_p12_root)
             self.train_set = ActiveSubset(_p12_full, _p12_pool_idx)
         else:
             self.train_set = self.dataset_cls(
                 self.data_root, train=True, transform=self.train_transforms
             )
-        if self.dataset not in ("ecg5000", "p12"):
+        if self.dataset not in ("ecg5000", "p12", "p12_transformer"):
             self.train_set = self._split_dataset(self.train_set, train=True)
 
         if self.imbalance:
@@ -194,9 +196,13 @@ class TorchVisionDM(BaseDataModule):
             )
 
         if self.active:
-            self.train_set = ActiveLearningDataset(
-                self.train_set, pool_specifics={"transform": self.test_transforms}
-            )
+            if self.dataset in ("p12", "p12_transformer"):
+                # P12 datasets handle normalisation internally and have no transform attribute.
+                self.train_set = ActiveLearningDataset(self.train_set)
+            else:
+                self.train_set = ActiveLearningDataset(
+                    self.train_set, pool_specifics={"transform": self.test_transforms}
+                )
 
         # ------------------------------------------------------------------ #
         # Build val / test sets                                                #
@@ -208,7 +214,7 @@ class TorchVisionDM(BaseDataModule):
             )
             self.val_set  = Subset(_ecg_full_eval, _ecg_val_idx)
             self.test_set = Subset(_ecg_full_eval, _ecg_test_idx)
-        elif self.dataset == "p12":
+        elif self.dataset in ("p12", "p12_transformer"):
             _p12_full_eval = self.dataset_cls(root=_p12_root)
             self.val_set   = Subset(_p12_full_eval, _p12_val_idx)
             self.test_set  = Subset(_p12_full_eval, _p12_test_idx)
@@ -219,7 +225,7 @@ class TorchVisionDM(BaseDataModule):
             self.test_set = self.dataset_cls(
                 self.data_root, train=False, transform=self.test_transforms
             )
-        if self.dataset not in ("ecg5000", "p12"):
+        if self.dataset not in ("ecg5000", "p12", "p12_transformer"):
             self.val_set = self._split_dataset(self.val_set, train=False)
 
     def train_dataloader(self) -> DataLoader:

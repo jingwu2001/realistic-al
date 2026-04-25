@@ -170,7 +170,7 @@ class AbstractClassifier(pl.LightningModule):
         self.log(f"{mode}/loss", loss, on_step=False, on_epoch=True)
         self.acc_val.update(preds, y)
         if batch_idx == 0 and self.current_epoch == 0:
-            if len(batch[0].shape) == 4:
+            if isinstance(batch[0], torch.Tensor) and len(batch[0].shape) == 4:
                 self.visualize_inputs(batch[0], name=f"{mode}/data")
         return logprob, y
 
@@ -193,7 +193,7 @@ class AbstractClassifier(pl.LightningModule):
         if self.bacc_test is not None:
             self.bacc_test.update(preds, y)
         if batch_idx == 0:
-            if len(batch[0].shape) == 4:
+            if isinstance(batch[0], torch.Tensor) and len(batch[0].shape) == 4:
                 self.visualize_inputs(batch[0], name=f"{mode}/data")
         return logprob, y
 

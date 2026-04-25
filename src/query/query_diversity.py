@@ -5,6 +5,7 @@ import os
 import math
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import DictConfig
 from scipy import stats
@@ -172,11 +173,14 @@ def get_grad_embedding(
         model.model, "classifier"
     )  # model.model requires classification head (due to code).
     for i, (x, y) in enumerate(dataloader):
-        inputs = x.to(device)
+        if isinstance(x, (list, tuple)):
+            inputs = [t.to(device) if isinstance(t, torch.Tensor) else t for t in x]
+        else:
+            inputs = x.to(device)
         with torch.no_grad():
             features = model.get_features(inputs)  # B x Z
         l1 = features  # B x Z
-        if not model.hparams.model.small_head:
+        if not model.hparams.model.small_head and isinstance(model.model.classifier, nn.Sequential):
             l1 = model.model.classifier[:-1](features)
         embDim = l1.shape[-1]
         outputs = model.model.classifier(features)
@@ -234,14 +238,20 @@ def _get_kcg(
     with torch.no_grad():
         features = torch.tensor([]).to(DEVICE)
         for inputs, _ in labeled_dataloader:
-            inputs = inputs.to(DEVICE)
+            if isinstance(inputs, (list, tuple)):
+                inputs = [t.to(DEVICE) if isinstance(t, torch.Tensor) else t for t in inputs]
+            else:
+                inputs = inputs.to(DEVICE)
             features_batch = model.get_features(inputs)
             features = torch.cat((features, features_batch), 0)
         feat_labeled = features.detach().cpu().numpy()
 
         features = torch.tensor([]).to(DEVICE)
         for inputs, _ in pool_loader:
-            inputs = inputs.to(DEVICE)
+            if isinstance(inputs, (list, tuple)):
+                inputs = [t.to(DEVICE) if isinstance(t, torch.Tensor) else t for t in inputs]
+            else:
+                inputs = inputs.to(DEVICE)
             features_batch = model.get_features(inputs)
             features = torch.cat((features, features_batch), 0)
         feat_unlabeled = features.detach().cpu().numpy()
@@ -405,7 +415,10 @@ def calculate_extra_info(acq_size, sorted_scores):
 def get_embeddings(model, loader, cpu=False, numpy=False):
     features = torch.tensor([]).to(DEVICE)
     for inputs, _ in loader:
-        inputs = inputs.to(DEVICE)
+        if isinstance(inputs, (list, tuple)):
+            inputs = [t.to(DEVICE) if isinstance(t, torch.Tensor) else t for t in inputs]
+        else:
+            inputs = inputs.to(DEVICE)
         features_batch = model.get_features(inputs)
         features = torch.cat((features, features_batch), 0)
     features = features.detach()

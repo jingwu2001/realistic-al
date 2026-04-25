@@ -73,6 +73,13 @@ from run_training import get_torchvision_dm
 # Helpers
 # ---------------------------------------------------------------------------
 
+def to_device(x, device):
+    """Move x to device; handles plain tensors and 4-tuples (transformer input)."""
+    if isinstance(x, (tuple, list)):
+        return type(x)(t.to(device) for t in x)
+    return x.to(device)
+
+
 def find_checkpoint(loop_dir: Path) -> Path:
     """Return the single .ckpt file saved by ModelCheckpoint.
 
@@ -171,7 +178,7 @@ def compute_metrics(model: BayesianModule, test_loader, device: torch.device, nu
 
     with torch.no_grad():
         for x, y in test_loader:
-            x, y = x.to(device), y.to(device)
+            x, y = to_device(x, device), y.to(device)
             # k=None uses model.k (10 by default for GRU-D, from hparams).
             # forward() → mc_nll() averages the k log-softmax outputs
             # (abstract_classifier.py:73-86), then argmax gives the hard pred.
@@ -291,6 +298,18 @@ def evaluate_run(run_dir: Path, device: torch.device, output_name: str = "eval_m
     return df
 
 
+def find_all_transformer_runs(experiments_root: Path):
+    """Discover all timestamped run directories under p12_transformer/."""
+    run_dirs = []
+    for exp_dir in sorted(experiments_root.glob("p12_transformer/**")):
+        if not exp_dir.is_dir():
+            continue
+        for candidate in sorted(exp_dir.iterdir()):
+            if candidate.is_dir() and (candidate / ".hydra").exists():
+                run_dirs.append(candidate)
+    return run_dirs
+
+
 def find_all_gru_runs(experiments_root: Path):
     """Discover all timestamped run directories that belong to GRU-D experiments.
 
@@ -330,6 +349,11 @@ def parse_args():
         action="store_true",
         help="Scan experiments/activelearning/p12/ and evaluate all GRU-D runs.",
     )
+    group.add_argument(
+        "--all-transformer",
+        action="store_true",
+        help="Scan experiments/activelearning/p12_transformer/ and evaluate all transformer runs.",
+    )
     parser.add_argument(
         "--experiments-root",
         type=Path,
@@ -361,6 +385,12 @@ if __name__ == "__main__":
             print(f"No GRU-D run directories found under {args.experiments_root}")
             sys.exit(1)
         print(f"Found {len(run_dirs)} GRU-D run(s).")
+    elif args.all_transformer:
+        run_dirs = find_all_transformer_runs(args.experiments_root)
+        if not run_dirs:
+            print(f"No transformer run directories found under {args.experiments_root}")
+            sys.exit(1)
+        print(f"Found {len(run_dirs)} transformer run(s).")
     else:
         run_dirs = [args.run_dir.resolve()]
 

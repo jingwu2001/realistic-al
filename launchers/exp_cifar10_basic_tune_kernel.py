@@ -1,11 +1,14 @@
+import subprocess
 from argparse import ArgumentParser
 
 from launcher import ExperimentLauncher
 
+_commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).strip().decode()
+
 config_dict = {
     "model": "resnet",
     "query": [
-        # "bandit",
+        "bandit",
         "vendi",
         # "random",
         # "entropy",
@@ -13,44 +16,44 @@ config_dict = {
         # "bald",
         # "badge",
     ],
-    "data": ["cifar10_imb"],
+    "data": ["cifar10"],
     "active": [
         "cifar10_low",
-        # "cifar10_med",
+        "cifar10_med",
         # "cifar10_high",
-    ],  # did not run! "standard_250", "cifar10_low_data"
+    ],
     "optim": ["sgd_cosine"],
-    # "query.vendi.kernel": ["rbf", "rbf", "rbf", "cosine"],
-    # "query.vendi.gamma": [0.1, 1.0, 10.0, None],
     "query.vendi.kernel": ["rbf"],
-    "query.vendi.gamma": [1.0],
+    "query.vendi.gamma": [1/1024],
     "query.vendi.normalization": ["minmax"],
-    "query.vendi.approx": True,
 }
 
 hparam_dict = {
-    "model.weighted_loss": True,
-    # "data.val_size": [50 * 5, 250 * 5, None],
-    "data.val_size": [50 * 5],
+    # "data.val_size": [250, 2500, None],
+    "data.val_size": [250, 2500],
     "trainer.seed": [12345, 12346, 12347],
     "trainer.max_epochs": 200,
-    "model.weight_decay": 5e-3,
-    "model.dropout_p": [0.5],
+    "model.dropout_p": [0.5] * len(config_dict['query']),
     "model.learning_rate": [0.1],
     "model.use_ema": False,
     "data.transform_train": [
         "cifar_randaugmentMC",
     ],
-    "trainer.batch_size": 1024,
     "trainer.precision": 16,
+    "trainer.batch_size": 1024,
     "trainer.deterministic": True,
 }
-naming_conv = "{data}/active-{active}/basic_model-{model}_drop-{model.dropout_p}_aug-{data.transform_train}_acq-{query}_ep-{trainer.max_epochs}__wloss-{model.weighted_loss}"
+naming_conv = (
+    "{data}/active-{active}/"
+    f"commit-{_commit}/"
+    "basic_model-{model}_drop-{model.dropout_p}_aug-{data.transform_train}_acq-{query}_norm-{query.vendi.normalization}_kernel-{query.vendi.kernel}_gamma-{query.vendi.gamma}_ep-{trainer.max_epochs}"
+    # "active_basic_{data}_set-{active}_{model}_acq-{query}_ep-{trainer.max_epochs}"
+)
 
 joint_iteration = [
-    ["model.dropout_p", "query"],
+    ["active", "data.val_size"],
+    ["query", "model.dropout_p"],
     # ["query.vendi.kernel", "query.vendi.gamma"],
-    ["data.val_size", "active"]
 ]
 
 path_to_ex_file = "src/main.py"

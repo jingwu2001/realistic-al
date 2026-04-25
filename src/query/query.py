@@ -196,10 +196,12 @@ def obtain_data_from_pool(pool: Dataset, indices: Iterable[int]):
         sample = pool[ind]
         data.append(sample[0])
         labels.append(sample[1])
-    data = torch.stack(data, dim=0)
-    labels = torch.tensor(labels, dtype=torch.int)
-    labels = labels.numpy()
-    data = data.numpy()
+    labels = torch.tensor(labels, dtype=torch.int).numpy()
+    if isinstance(data[0], (list, tuple)):
+        # Tuple-input datasets (e.g. P12 transformer): skip stacking.
+        # acq_data is only used for visualization which handles failures gracefully.
+        return data, labels
+    data = torch.stack(data, dim=0).numpy()
     return data, labels
 
 
@@ -211,7 +213,10 @@ def evaluate_accuracy(model: torch.nn.Module, dataloader: DataLoader, device="cu
     for batch in dataloader:
         with torch.no_grad():
             x, y = batch
-            x = x.to(device)
+            if isinstance(x, (list, tuple)):
+                x = [t.to(device) if isinstance(t, torch.Tensor) else t for t in x]
+            else:
+                x = x.to(device)
             out = model(x)
             pred = torch.argmax(out, dim=1)
             correct += (pred.cpu() == y).sum().item()
