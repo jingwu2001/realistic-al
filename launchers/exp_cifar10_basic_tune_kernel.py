@@ -53,7 +53,6 @@ naming_conv = (
 joint_iteration = [
     ["active", "data.val_size"],
     ["query", "model.dropout_p"],
-    # ["query.vendi.kernel", "query.vendi.gamma"],
 ]
 
 path_to_ex_file = "src/main.py"
