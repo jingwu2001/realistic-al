@@ -67,6 +67,11 @@ class BaseLauncher:
         self.parsed_product = self.parse_product()
 
         # Naming Scheme
+        self.commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).strip().decode()
+        if "commit-" not in naming_convention:
+            parts = naming_convention.split("/", 2)
+            if len(parts) >= 3:
+                naming_convention = parts[0] + "/" + parts[1] + "/commit-{commit}/" + parts[2]
         self.naming_convention = naming_convention
         self.add_name = add_name
 
@@ -107,7 +112,7 @@ class BaseLauncher:
         """
         naming_dict = self.merge_dictionaries(config_dict, param_dict)
 
-        temp_dict = {}
+        temp_dict = {"commit": self.commit}
         for key, val in naming_dict.items():
             key_use = self.validify_string_for_format(key)
             temp_dict[key_use] = val

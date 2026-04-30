@@ -1,6 +1,10 @@
+import subprocess
+
 from argparse import ArgumentParser
 
 from launcher import ExperimentLauncher
+
+_commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).strip().decode()
 
 config_dict = {
     "model": "resnet",
@@ -45,7 +49,11 @@ hparam_dict = {
     "trainer.deterministic": True,
 }
 
-naming_conv = "{data}/active-{active}/basic_model-{model}_drop-{model.dropout_p}_aug-{data.transform_train}_acq-{query}_norm-{query.vendi.normalization}_kernel-{query.vendi.kernel}_gamma-{query.vendi.gamma}_ep-{trainer.max_epochs}__wloss-{model.weighted_loss}"
+naming_conv = (
+    "{data}/active-{active}/"
+    f"commit-{_commit}/"
+    "basic_model-{model}_drop-{model.dropout_p}_aug-{data.transform_train}_acq-{query}_norm-{query.vendi.normalization}_kernel-{query.vendi.kernel}_gamma-{query.vendi.gamma}_ep-{trainer.max_epochs}__wloss-{model.weighted_loss}"
+)
 
 joint_iteration = [
     ["model.dropout_p", "query"],
