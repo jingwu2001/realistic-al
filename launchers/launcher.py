@@ -2,6 +2,7 @@ import os
 import subprocess
 from argparse import ArgumentParser, Namespace
 from copy import deepcopy
+from datetime import datetime
 from itertools import product
 from typing import Any, Dict, Iterable, List, Tuple, Union
 
@@ -265,6 +266,7 @@ class BaseLauncher:
 
     def launch_runs(self):
         """Execute all runs specified in init."""
+        experiment_root = os.environ.get("EXPERIMENT_ROOT", "experiments")
         for i, (config_dict, param_dict) in enumerate(self.parsed_product):
             counter = i + 1
             if counter <= self.launcher_args.num_start or (
@@ -284,7 +286,12 @@ class BaseLauncher:
 
             print(launch_command)
             if not self.launcher_args.debug:
-                subprocess.run(launch_command, shell=True, check=True)
+                log_dir = os.path.join(experiment_root, "activelearning", experiment_name)
+                os.makedirs(log_dir, exist_ok=True)
+                log_path = os.path.join(log_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + ".log")
+                print(f"Logging to: {log_path}")
+                with open(log_path, "w") as log_file:
+                    subprocess.run(launch_command, shell=True, check=True, stdout=log_file, stderr=log_file)
 
     @staticmethod
     def dict_to_arg(
