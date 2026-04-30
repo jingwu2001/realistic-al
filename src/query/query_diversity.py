@@ -446,18 +446,23 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
         and diagonalize the matrices
     """
     vendi_cfg = cfg.query.vendi
-    gamma = vendi_cfg.gamma
     q = vendi_cfg.q
     batch_size = vendi_cfg.batch_size if vendi_cfg.batch_size is not None else 200
+    if isinstance(vendi_cfg.gamma, float):
+        gamma = vendi_cfg.gamma
+    elif vendi_cfg.gamma == 'median':
+        dists = torch.cdist(feat_labeled, feat_labeled)
+        gamma = dists[torch.triu(torch.ones_like(dists, dtype=torch.bool), diagonal=1)].median().item()
+    else:
+        raise ValueError(f"Unsupported str gamma: {gamma}")
 
     L = feat_labeled.shape[0]
     U = feat_unlabeled.shape[0]
 
     # K_LL and K_UL are kernel matrices
-
-    K_LL = compute_kernel_matrix(cfg, feat_labeled, feat_labeled)
+    K_LL = compute_kernel_matrix(vendi_cfg.kernel, gamma, feat_labeled, feat_labeled)
     K_LL = torch.as_tensor(K_LL, dtype=torch.float64, device=DEVICE)
-    K_UL = compute_kernel_matrix(cfg, feat_unlabeled, feat_labeled)
+    K_UL = compute_kernel_matrix(vendi_cfg.kernel, gamma, feat_unlabeled, feat_labeled)
     K_UL = torch.as_tensor(K_UL, dtype=torch.float64, device=DEVICE)
 
     K = torch.empty(batch_size, L + 1, L + 1, device=DEVICE, dtype=torch.float64)
@@ -503,7 +508,8 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
     return scores
 
 def compute_kernel_matrix(
-    cfg: DictConfig, 
+    kernel: str,
+    gamma: float,
     x: Union[np.ndarray, torch.tensor], 
     y: Union[np.ndarray, torch.tensor],
 ) -> torch.Tensor:
@@ -514,14 +520,13 @@ def compute_kernel_matrix(
     feat_labeled: (L, D)
     feat_unlabeled: (U, D)
     """
-    vendi_cfg = cfg.query.vendi
 
-    if vendi_cfg.kernel == 'rbf':
-        return rbf_kernel(x, y, gamma=vendi_cfg.gamma)
-    elif vendi_cfg.kernel == 'cosine':
+    if kernel == 'rbf':
+        return rbf_kernel(x, y, gamma=gamma)
+    elif kernel == 'cosine':
         return cosine_similarity(x, y)
     else:
-        raise ValueError(f"Unknown kernel: {vendi_cfg.kernel}")
+        raise ValueError(f"Unknown kernel: {kernel}")
 
 
 # TODO: 
