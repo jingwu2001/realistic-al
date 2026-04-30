@@ -24,7 +24,7 @@ config_dict = {
     ],
     "optim": ["sgd_cosine"],
     "query.vendi.kernel": ["rbf"],
-    "query.vendi.gamma": [1/1024],
+    "query.vendi.gamma": ["median"],
     "query.vendi.normalization": ["minmax"],
 }
 

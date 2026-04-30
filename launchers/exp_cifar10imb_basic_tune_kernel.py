@@ -23,7 +23,7 @@ config_dict = {
     # "query.vendi.kernel": ["rbf", "rbf", "rbf", "cosine"],
     # "query.vendi.gamma": [0.1, 1.0, 10.0, None],
     "query.vendi.kernel": ["rbf"],
-    "query.vendi.gamma": [1/1024],
+    "query.vendi.gamma": ["median"],
     "query.vendi.normalization": ["minmax"],
 }
 
