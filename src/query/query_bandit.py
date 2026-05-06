@@ -146,9 +146,17 @@ class BanditQuerySampler(QuerySampler):
         feat_Q_u   = feat_unlabeled[acq_indices_bald]
         feat_Q_d   = feat_unlabeled[acq_indices_vendi]
 
-        vendi_L       = calculate_vendi_score(cfg, feat_labeled)
-        vendi_Q_u_L   = calculate_vendi_score(cfg, torch.cat([feat_Q_u, feat_labeled], dim=0))
-        vendi_Q_d_L   = calculate_vendi_score(cfg, torch.cat([feat_Q_d, feat_labeled], dim=0))
+        
+        if cfg.query.vendi.gamma == 'median':
+            dists = torch.cdist(feat_labeled, feat_labeled)
+            gamma = dists[torch.triu(torch.ones_like(dists, dtype=torch.bool), diagonal=1)].median().item()
+            print("Using median as gamma")
+        else:
+            gamma = cfg.query.vendi.gamma
+
+        vendi_L       = calculate_vendi_score(cfg, gamma, feat_labeled)
+        vendi_Q_u_L   = calculate_vendi_score(cfg, gamma, torch.cat([feat_Q_u, feat_labeled], dim=0))
+        vendi_Q_d_L   = calculate_vendi_score(cfg, gamma, torch.cat([feat_Q_d, feat_labeled], dim=0))
 
         # Now we can compute mean_bald(Q_d): BALD scores of the diversity-selected samples
         mean_bald_Q_d = float(bald_scores_pool[acq_indices_vendi].mean())
@@ -207,12 +215,12 @@ class BanditQuerySampler(QuerySampler):
             return acq_indices_vendi, acq_vals_vendi, {"bandit_arm": 1}
 
 
-def calculate_vendi_score(cfg, feats):
+def calculate_vendi_score(cfg, gamma, feats):
     """
     IMPORTANT: sklearn kernels take numpy array or torch tensor on CPU, not tensor on GPU
     """
     vendi_cfg = cfg.query.vendi
-    gamma, q, kernel = vendi_cfg.gamma, vendi_cfg.q, vendi_cfg.kernel
+    q, kernel = vendi_cfg.q, vendi_cfg.kernel
 
     # Kernel matrix
     if kernel == 'rbf':
