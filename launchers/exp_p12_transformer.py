@@ -8,13 +8,13 @@ config_dict = {
         "transformer2",
     ],
     "query": [
-        # "bald",
+        "bald",
         "random",
-        # "entropy",
-        # "badge",
+        "entropy",
+        "badge",
         "kcentergreedy",
-        # "vendi",
-        # "bandit",
+        "vendi",
+        "bandit",
     ],
     "data": ["p12_transformer"],
     "active": [
@@ -26,7 +26,8 @@ config_dict = {
 }
 
 hparam_dict = {
-    "model.weighted_loss": False,
+    "data.balanced_sampling": False,
+    "model.weighted_loss": True,
     "trainer.seed": [12345, 12346, 12347],
     "trainer.max_epochs": 50,
     "model.dropout_p": [0.5] * len(config_dict['query']),
@@ -38,7 +39,7 @@ hparam_dict = {
     "trainer.deterministic": True,
 }
 
-naming_conv = "{data}/active-{active}/model-{model}_drop-{model.dropout_p}_acq-{query}_ep-{trainer.max_epochs}"
+naming_conv = "{data}/active-{active}/model-{model}_drop-{model.dropout_p}_acq-{query}_ep-{trainer.max_epochs}_bs-{data.balanced_sampling}_wl-{model.weighted_loss}"
 
 joint_iteration = [
     ["model.dropout_p", "query"],

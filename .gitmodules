@@ -1,3 +1,6 @@
 [submodule "Raindrop"]
 	path = Raindrop
 	url = git@github.com:jingwu2001/Raindrop.git
+[submodule "vendi-approx"]
+	path = vendi-approx
+	url = git@github.com:jingwu2001/vendi-approx.git
