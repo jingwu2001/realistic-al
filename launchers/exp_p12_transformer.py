@@ -18,8 +18,9 @@ config_dict = {
     ],
     "data": ["p12_transformer"],
     "active": [
-        # "p12_low",   # Might want to change balanced in p12_low.cfg to true (balanced label pool init)
-        "p12_med",
+        # "p12_low",
+        # "p12_med",
+        "p12_med_bal",  # balanced initial pool: 50 survived + 50 died
         # "p12_high",
     ],
     "optim": ["adam"],
