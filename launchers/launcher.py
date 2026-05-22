@@ -168,6 +168,9 @@ class BaseLauncher:
         parser.add_argument(
             "-b", "--bsub", action="store_true", help="Executes the script via bsub"
         )
+        parser.add_argument(
+            "--test", action="store_true", help="Quick smoke test: 2 AL iterations, 3 epochs"
+        )
         return parser
 
     @staticmethod
@@ -187,6 +190,9 @@ class BaseLauncher:
         """
         if launcher_args.bsub:
             hparam_dict["trainer.progress_bar_refresh_rate"] = 0
+        if launcher_args.test:
+            hparam_dict["active.num_iter"] = 2
+            hparam_dict["trainer.max_epochs"] = 3
         return config_dict, hparam_dict
 
     def parse_product(self) -> list:
