@@ -9,7 +9,7 @@ config_dict = {
     "model": "resnet",
     "query": [
         "bandit",
-        "vendi",
+        # "vendi",
         # "random",
         # "entropy",
         # "kcentergreedy",
