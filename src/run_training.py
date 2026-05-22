@@ -40,6 +40,9 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> TorchVis
     val_size = None
     if "val_size" in cfg.data:
         val_size = cfg.data.val_size
+    balanced_test_val = False
+    if "balanced_test_val" in cfg.data:
+        balanced_test_val = cfg.data.balanced_test_val
 
     datamodule = TorchVisionDM(
         data_root=cfg.trainer.data_root,
@@ -62,6 +65,7 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> TorchVis
         timeout=cfg.trainer.timeout,
         val_size=val_size,
         balanced_sampling=balanced_sampling,
+        balanced_test_val=balanced_test_val,
     )
 
     return datamodule

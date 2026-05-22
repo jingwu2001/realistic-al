@@ -1,0 +1,10 @@
+name: p12_transformer
+shape: [215, 36]
+num_classes: 2
+val_split: 0.1
+mean: [0.0]
+std: [1.0]
+transform_train: basic
+transform_test: basic
+balanced_sampling: false
+balanced_test_val: true

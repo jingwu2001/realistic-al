@@ -45,6 +45,7 @@ class TorchVisionDM(BaseDataModule):
         timeout: int = 0,
         val_size: Optional[int] = None,
         balanced_sampling: bool = False,
+        balanced_test_val: bool = False,
     ):
         super().__init__(
             val_split=val_split,
@@ -88,6 +89,7 @@ class TorchVisionDM(BaseDataModule):
             transform_test, self.mean, self.std, self.shape
         )
         self.imbalance = imbalance
+        self.balanced_test_val = balanced_test_val
 
         ### IMPLEMENTATION ###
         # Novel image datasets can be added here
@@ -118,15 +120,32 @@ class TorchVisionDM(BaseDataModule):
         if not self.shuffle:
             raise ValueError("shuffle flag has to be set to true")
 
-    def _stratified_3way_split(self, labels, n_total, test_size, val_size):
-        """Return (test_idx, val_idx, pool_idx) with stratification by class label."""
+    def _stratified_3way_split(self, labels, n_total, test_size, val_size,
+                               balanced_eval: bool = False):
+        """Return (test_idx, val_idx, pool_idx) with stratification by class label.
+
+        When balanced_eval=True, test and val receive equal numbers of samples
+        per class (limited by the minority class), so eval sets are 50/50.
+        The pool receives all remaining samples and may still be imbalanced.
+        """
         rng = np.random.default_rng(self.seed)
         test_idx, val_idx, pool_idx = [], [], []
-        for c in np.unique(labels):
+        classes = np.unique(labels)
+        n_classes = len(classes)
+
+        if balanced_eval:
+            n_test_per_class = max(1, test_size // n_classes)
+            n_val_per_class  = max(1, val_size  // n_classes)
+
+        for c in classes:
             c_idx = np.where(labels == c)[0]
             rng.shuffle(c_idx)
-            n_test = max(1, round(len(c_idx) * test_size / n_total))
-            n_val  = max(1, round(len(c_idx) * val_size  / n_total))
+            if balanced_eval:
+                n_test = min(n_test_per_class, len(c_idx) // 3)
+                n_val  = min(n_val_per_class,  (len(c_idx) - n_test) // 3)
+            else:
+                n_test = max(1, round(len(c_idx) * test_size / n_total))
+                n_val  = max(1, round(len(c_idx) * val_size  / n_total))
             test_idx.append(c_idx[:n_test])
             val_idx.append( c_idx[n_test:n_test + n_val])
             pool_idx.append(c_idx[n_test + n_val:])
@@ -159,7 +178,8 @@ class TorchVisionDM(BaseDataModule):
             _p12_val_size   = (self.val_split if isinstance(self.val_split, int)
                                else max(1, round(self.val_split * _p12_n_total)))
             _p12_test_idx, _p12_val_idx, _p12_pool_idx = self._stratified_3way_split(
-                _p12_labels, _p12_n_total, _p12_test_size, _p12_val_size
+                _p12_labels, _p12_n_total, _p12_test_size, _p12_val_size,
+                balanced_eval=self.balanced_test_val,
             )
 
         # ------------------------------------------------------------------ #
