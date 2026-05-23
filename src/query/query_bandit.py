@@ -135,7 +135,7 @@ class BanditQuerySampler(QuerySampler):
             feat_labeled, feat_unlabeled, normalization
         )
 
-        vendi_scores_pool = query_diversity.vendi_from_features(cfg, feat_labeled, feat_unlabeled)
+        vendi_scores_pool, _ = query_diversity.vendi_from_features(cfg, feat_labeled, feat_unlabeled)
 
         # Q_d  — top-k by Vendi (diversity arm)
         sorted_vendi      = np.argsort(vendi_scores_pool)[::-1].copy()

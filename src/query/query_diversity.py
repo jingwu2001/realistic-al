@@ -15,6 +15,7 @@ from .kcenterGreedy import KCenterGreedy
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from models.bayesian_module import BayesianModule
+from utils.timer import Timer
 
 
 NAMES = ["kcentergreedy", "badge", "vendi"]
@@ -287,15 +288,16 @@ def _get_vendi(
     # feat_labeled: (num_labeled, feature_dim)
     # feat_unlabeled: (num_unlabeled, feature_dim)
 
-    scores = vendi_from_features(cfg, feat_labeled, feat_unlabeled)
+    scores, eig_time = vendi_from_features(cfg, feat_labeled, feat_unlabeled)
     # scores: (num_unlabeled,)
-    
+
     # Sort scores descending
     sorted_indices = np.argsort(scores)[::-1]
     sorted_scores = scores[sorted_indices]
     acq_indices = sorted_indices[:acq_size]
-    
+
     extra_info_dict = calculate_extra_info(acq_size, sorted_scores)
+    extra_info_dict["eig_time_s"] = round(eig_time, 4)
 
     return acq_indices, sorted_scores[:acq_size], extra_info_dict
 
@@ -473,6 +475,7 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
     n_eig = int((L + 1) / 3) if vendi_cfg.approx else L + 1
     eig_vals = torch.zeros(U, n_eig, device=DEVICE, dtype=torch.float64)
 
+    eig_time = 0.0
     num_iter = math.ceil(U / batch_size)
     for i in tqdm(range(num_iter), desc="Calculating Vendi scores"):
         K_UL_batch = K_UL[batch_size * i: batch_size * (i + 1)]
@@ -482,14 +485,17 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
         K_batch[:, L, :L] = K_UL_batch
         K_batch[:, :L, L] = K_UL_batch
 
-        if vendi_cfg.approx:
-            k = int(K_batch.shape[1] / 3)
-            ev, _ = torch.lobpcg(K_batch, k=k)
-            ev = ev.clamp(min=0)
-            ev_sum = ev.sum(dim=1, keepdim=True)
-            ev = ev / ev_sum.clamp(min=1e-12)
-        else:
-            ev = torch.linalg.eigvalsh(K_batch).clamp(min=0) / (L + 1)
+        with Timer() as _t:
+            if vendi_cfg.approx:
+                k = int(K_batch.shape[1] / 3)
+                ev, _ = torch.lobpcg(K_batch, k=k)
+                ev = ev.clamp(min=0)
+                ev_sum = ev.sum(dim=1, keepdim=True)
+                ev = ev / ev_sum.clamp(min=1e-12)
+            else:
+                ev = torch.linalg.eigvalsh(K_batch).clamp(min=0) / (L + 1)
+        eig_time += _t.elapsed
+
         eig_vals[batch_size * i: batch_size * (i + 1)] = ev
         entropy = renyi_entropy(ev, q)
 
@@ -505,7 +511,7 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
     torch.cuda.empty_cache()
     
     scores = scores.exp().detach().cpu().numpy()
-    return scores
+    return scores, eig_time
 
 def compute_kernel_matrix(
     kernel: str,
