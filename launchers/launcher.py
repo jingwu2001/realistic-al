@@ -68,10 +68,11 @@ class BaseLauncher:
 
         # Naming Scheme
         self.commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).strip().decode()
+        self.start_date = datetime.now().strftime("%Y%m%d")
         if "commit-" not in naming_convention:
             parts = naming_convention.split("/", 2)
             if len(parts) >= 3:
-                naming_convention = parts[0] + "/" + parts[1] + "/commit-{commit}/" + parts[2]
+                naming_convention = parts[0] + "/" + parts[1] + "/{start_date}-{commit}/" + parts[2]
         self.naming_convention = naming_convention
         self.add_name = add_name
 
@@ -112,7 +113,7 @@ class BaseLauncher:
         """
         naming_dict = self.merge_dictionaries(config_dict, param_dict)
 
-        temp_dict = {"commit": self.commit}
+        temp_dict = {"commit": self.commit, "start_date": self.start_date}
         for key, val in naming_dict.items():
             key_use = self.validify_string_for_format(key)
             temp_dict[key_use] = val
@@ -171,6 +172,9 @@ class BaseLauncher:
         parser.add_argument(
             "--test", action="store_true", help="Quick smoke test: 2 AL iterations, 3 epochs"
         )
+        parser.add_argument(
+            "--notes", default="", type=str, help="Notes to attach to the wandb run"
+        )
         return parser
 
     @staticmethod
@@ -193,6 +197,7 @@ class BaseLauncher:
         if launcher_args.test:
             hparam_dict["active.num_iter"] = 2
             hparam_dict["trainer.max_epochs"] = 3
+            hparam_dict["trainer.is_test"] = True
         return config_dict, hparam_dict
 
     def parse_product(self) -> list:
@@ -293,6 +298,9 @@ class BaseLauncher:
             experiment_arg = self.add_name + experiment_name
 
             full_args = config_args + param_args + " " + experiment_arg
+            if getattr(self.launcher_args, "notes", ""):
+                import shlex
+                full_args += f" ++trainer.wandb_notes={shlex.quote(self.launcher_args.notes)}"
             launch_command = f"{self.ex_call} {self.path_to_ex_file} {full_args}"
 
             print(launch_command)

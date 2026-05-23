@@ -24,3 +24,4 @@ run_test: True
 use_wandb: True
 wandb_project: realistic-al
 wandb_notes: ""
+is_test: False
