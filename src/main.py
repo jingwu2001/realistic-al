@@ -15,6 +15,7 @@ from run_training import get_torchvision_dm, label_active_dm
 from trainer import ActiveTrainingLoop
 from query.bandit import BanditManager
 from utils import config_utils
+from utils.timer import Timer
 from utils.log_utils import setup_logger
 
 
@@ -85,6 +86,7 @@ def active_loop(
     
     last_val_acc = 0.0
     last_arm = None
+    timing_records = []
 
     for i in range(num_iter):
         logger.info("Start Active Loop {}".format(i))
@@ -93,7 +95,8 @@ def active_loop(
             cfg, count=i, datamodule=datamodule, base_dir=os.getcwd(), bandit_manager=bandit_manager
         )
         logger.info("Start Training of Loop {}".format(i))
-        training_loop.main()
+        with Timer() as train_timer:
+            training_loop.main()
         
         # --- Bandit Reward Logic ---
         # Get current validation accuracy
@@ -126,11 +129,15 @@ def active_loop(
                 f"Pool exhausted after loop {i} ({pool_size} samples remaining, "
                 f"acq_size={acq_size}). Stopping early and saving results."
             )
+            timing_records.append({"iteration": i, "train_time_s": round(train_timer.elapsed, 4), "query_time_s": float("nan"), "eig_time_s": float("nan")})
             del training_loop
             break
 
         logger.info("Start Acquisition of Loop {}".format(i))
-        active_store = training_loop.active_callback()
+        with Timer() as query_timer:
+            active_store = training_loop.active_callback()
+        eig_time = active_store.extra_info.get("eig_time_s", float("nan")) if active_store.extra_info else float("nan")
+        timing_records.append({"iteration": i, "train_time_s": round(train_timer.elapsed, 4), "query_time_s": round(query_timer.elapsed, 4), "eig_time_s": eig_time})
         
         # Capture the arm selected for THIS query (to be rewarded in NEXT loop)
         if bandit_manager:
@@ -148,6 +155,8 @@ def active_loop(
         time.sleep(1)
 
     store_path = "."
+    if timing_records:
+        pd.DataFrame(timing_records).to_csv(os.path.join(store_path, "timing.csv"), index=False)
     metrics_df = []
     for metric_path in metric_paths:
         # laod metrics from csv
