@@ -3,9 +3,12 @@ import os
 import time
 from typing import Callable
 
+import wandb
+
 import hydra
 import numpy as np
 import pandas as pd
+from hydra.core.hydra_config import HydraConfig
 from loguru import logger
 from omegaconf import DictConfig
 
@@ -37,16 +40,52 @@ def main(cfg: DictConfig):
         bandit_context_dim = bandit_config.context_dim if "bandit" in cfg.query and "context_dim" in bandit_config else 4
         bandit_manager = BanditManager(context_dim=bandit_context_dim, alpha=bandit_alpha)
 
-    active_loop(
-        cfg,
-        ActiveTrainingLoop,
-        get_torchvision_dm,
-        cfg.active.num_labelled,
-        cfg.active.balanced,
-        cfg.active.acq_size,
-        cfg.active.num_iter,
-        bandit_manager=bandit_manager,
-    )
+    wandb_run = None
+    if cfg.trainer.use_wandb:
+        hydra_choices = HydraConfig.get().runtime.choices
+        wandb_run = wandb.init(
+            project=cfg.trainer.wandb_project,
+            name=f"{cfg.trainer.experiment_name}/{cfg.trainer.experiment_id}",
+            group=cfg.trainer.experiment_name,
+            tags=[cfg.query.name, cfg.data.name, hydra_choices.get("active", "")],
+            notes=cfg.trainer.wandb_notes or None,
+            config={
+                "query": cfg.query.name,
+                "model": cfg.model.name,
+                "data": cfg.data.name,
+                "num_labelled": cfg.active.num_labelled,
+                "acq_size": cfg.active.acq_size,
+                "num_iter": cfg.active.num_iter,
+            },
+        )
+
+    try:
+        active_loop(
+            cfg,
+            ActiveTrainingLoop,
+            get_torchvision_dm,
+            cfg.active.num_labelled,
+            cfg.active.balanced,
+            cfg.active.acq_size,
+            cfg.active.num_iter,
+            bandit_manager=bandit_manager,
+            wandb_run=wandb_run,
+        )
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
+
+
+def _read_loop_test_metrics(log_dir) -> dict:
+    """Return test metric values from the last row of a loop's metrics.csv."""
+    try:
+        df = pd.read_csv(os.path.join(log_dir, "metrics.csv"))
+        test_cols = [c for c in df.columns if "test" in c and c not in ("epoch", "step")]
+        if test_cols:
+            return dict(df[test_cols].dropna().iloc[-1])
+    except Exception:
+        pass
+    return {}
 
 
 @logger.catch
@@ -61,6 +100,7 @@ def active_loop(
     acq_size: int = 10,
     num_iter: int = 0,
     bandit_manager: BanditManager = None,
+    wandb_run=None,
 ):
     """Perform Active Learning over multiple loops.
 
@@ -92,7 +132,8 @@ def active_loop(
         logger.info("Start Active Loop {}".format(i))
         # Perform active learning iteration with training and labeling
         training_loop = ActiveTrainingLoop(
-            cfg, count=i, datamodule=datamodule, base_dir=os.getcwd(), bandit_manager=bandit_manager
+            cfg, count=i, datamodule=datamodule, base_dir=os.getcwd(),
+            bandit_manager=bandit_manager, wandb_run=wandb_run,
         )
         logger.info("Start Training of Loop {}".format(i))
         with Timer() as train_timer:
@@ -130,6 +171,10 @@ def active_loop(
                 f"acq_size={acq_size}). Stopping early and saving results."
             )
             timing_records.append({"iteration": i, "train_time_s": round(train_timer.elapsed, 4), "query_time_s": float("nan"), "eig_time_s": float("nan")})
+            if wandb_run is not None:
+                log_dict = {"al_iter": i, "n_labelled": cfg.active.num_labelled, "train_time_s": round(train_timer.elapsed, 4)}
+                log_dict.update(_read_loop_test_metrics(training_loop.log_dir))
+                wandb_run.log(log_dict, step=i)
             del training_loop
             break
 
@@ -149,6 +194,16 @@ def active_loop(
                 
         datamodule.train_set.label(active_store.requests)
         active_stores.append(active_store)
+        if wandb_run is not None:
+            log_dict = {
+                "al_iter": i,
+                "n_labelled": cfg.active.num_labelled,
+                "train_time_s": round(train_timer.elapsed, 4),
+                "query_time_s": round(query_timer.elapsed, 4),
+                "eig_time_s": eig_time,
+            }
+            log_dict.update(_read_loop_test_metrics(training_loop.log_dir))
+            wandb_run.log(log_dict, step=i)
         cfg.active.num_labelled += cfg.active.acq_size
         logger.info("Finalized Loop {}".format(i))
         del training_loop

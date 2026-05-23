@@ -33,6 +33,7 @@ class ActiveTrainingLoop(object):
         base_dir: str = os.getcwd(),  # TODO: change this to some other value!
         loggers: str = True,
         bandit_manager=None,
+        wandb_run=None,
     ):
         # Class capturing the logic for Active Training Loops.
         self.cfg = cfg
@@ -42,6 +43,7 @@ class ActiveTrainingLoop(object):
         self.device = "cuda:0"
         self.base_dir = Path(base_dir)  # carries path to run
         self._save_dict = dict()
+        self.wandb_run = wandb_run
         self._init_model()
         self.ckpt_callback = self._init_ckpt_callback()
         self.callbacks = self._init_callbacks()
@@ -145,7 +147,11 @@ class ActiveTrainingLoop(object):
             name=self.name,
             version=self.version,
         )
-        return [tb_logger, csv_logger]
+        loggers = [tb_logger, csv_logger]
+        if self.wandb_run is not None:
+            wandb_logger = pl.loggers.WandbLogger(experiment=self.wandb_run)
+            loggers.append(wandb_logger)
+        return loggers
 
     def _init_model(self):
         self.model = BayesianModule(self.cfg)
