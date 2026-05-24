@@ -195,8 +195,7 @@ class BaseLauncher:
         if launcher_args.bsub:
             hparam_dict["trainer.progress_bar_refresh_rate"] = 0
         if launcher_args.test:
-            hparam_dict["active.num_iter"] = 2
-            hparam_dict["trainer.max_epochs"] = 3
+            hparam_dict["trainer.max_epochs"] = 10
             hparam_dict["trainer.is_test"] = True
         return config_dict, hparam_dict
 

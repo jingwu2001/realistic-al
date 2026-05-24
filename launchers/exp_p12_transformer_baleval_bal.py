@@ -5,6 +5,8 @@ Test and val sets are 50% positive + 50% negative.
 Training dataloader uses WeightedRandomSampler to present balanced batches
 from the naturally imbalanced pool.  Initial labeled set is also balanced
 (p12_med_bal: 50 survived + 50 died).
+Weighted loss is disabled because balanced sampling already equalises the
+class distribution seen by the optimizer.
 """
 from argparse import ArgumentParser
 
@@ -28,7 +30,7 @@ config_dict = {
 
 hparam_dict = {
     "data.balanced_sampling": True,
-    "model.weighted_loss": True,
+    "model.weighted_loss": False,
     "trainer.seed": [12345, 12346, 12347],
     "trainer.max_epochs": 50,
     "model.dropout_p": [0.5] * len(config_dict["query"]),
