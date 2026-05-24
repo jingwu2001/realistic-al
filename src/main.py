@@ -55,7 +55,7 @@ def main(cfg: DictConfig):
             name=f"{cfg.query.name}/seed-{cfg.trainer.seed}",  # e.g. "vendi/seed-12345"
             group=f"{cfg.data.name}/{active_name}/{cfg.query.name}",  # e.g. "cifar10_imb/cifar10_low/vendi"
             tags=[cfg.data.name, active_name, cfg.query.name, session_tag] + (["test"] if cfg.trainer.is_test else []),  # e.g. ["cifar10_imb", "cifar10_low", "vendi", "20260523_f8fe30ab"]
-            notes=cfg.trainer.wandb_notes or None,        # e.g. "run on hpc"
+            notes=str(cfg.trainer.wandb_notes) or None,    # e.g. "run on hpc"
             config={
                 "query": cfg.query.name,
                 "model": cfg.model.name,
