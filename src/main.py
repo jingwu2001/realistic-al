@@ -46,14 +46,16 @@ def main(cfg: DictConfig):
         hydra_choices = HydraConfig.get().runtime.choices
         active_name = hydra_choices.get("active", "")
         commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).strip().decode()
-        date_str = cfg.trainer.experiment_id[:8].replace("-", "")  # "20260523" from "2026-05-23_..."
-        session_tag = f"{date_str}_{commit}"
+        _eid = cfg.trainer.experiment_id  # "2026-05-23_18-53-00-411537"
+        date_str = _eid[:10].replace("-", "")   # "20260523"
+        time_str = _eid[11:19].replace("-", "")  # "185300"
+        session_tag = f"{date_str}-{time_str}_{commit}"  # "20260523-185300_f8fe30ab"
         wandb_run = wandb.init(
             project=cfg.trainer.wandb_project,           # e.g. "realistic-al"
             name=f"{cfg.query.name}/seed-{cfg.trainer.seed}",  # e.g. "vendi/seed-12345"
             group=f"{cfg.data.name}/{active_name}/{cfg.query.name}",  # e.g. "cifar10_imb/cifar10_low/vendi"
             tags=[cfg.data.name, active_name, cfg.query.name, session_tag] + (["test"] if cfg.trainer.is_test else []),  # e.g. ["cifar10_imb", "cifar10_low", "vendi", "20260523_f8fe30ab"]
-            notes=cfg.trainer.wandb_notes or None,        # e.g. "run on hpc"
+            notes=str(cfg.trainer.wandb_notes) or None,    # e.g. "run on hpc"
             config={
                 "query": cfg.query.name,
                 "model": cfg.model.name,
@@ -67,6 +69,7 @@ def main(cfg: DictConfig):
         )
         wandb_run.define_metric("al/*", step_metric="al_iter")
 
+    exit_code = 0
     try:
         active_loop(
             cfg,
@@ -79,9 +82,12 @@ def main(cfg: DictConfig):
             bandit_manager=bandit_manager,
             wandb_run=wandb_run,
         )
+    except Exception:
+        exit_code = 1
+        raise
     finally:
         if wandb_run is not None:
-            wandb_run.finish()
+            wandb_run.finish(exit_code=exit_code)
 
 
 def _read_loop_metrics(log_dir) -> dict:
