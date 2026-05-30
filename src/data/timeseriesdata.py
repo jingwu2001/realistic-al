@@ -1,13 +1,10 @@
 # Adapterd from Pytorch Lighntning Bolts VisionDataModule  : https://github.com/PyTorchLightning/lightning-bolts
-from typing import Generator, Optional, Sequence, Union
+from typing import Optional, Sequence, Union
 import os
 import numpy as np
-import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader, Dataset, Subset, random_split
-from torchvision.datasets import CIFAR10, CIFAR100, MNIST, FashionMNIST
+from torch.utils.data import DataLoader, Subset
 
-from data.mio_dataset import MIOTCDDataset
 from data.ecg5000_dataset import ECG5000Dataset
 from data.p12_dataset import P12Dataset, P12TransformerDataset
 
@@ -15,7 +12,6 @@ from .active import ActiveLearningDataset
 from .base_datamodule import BaseDataModule
 from .utils import ActiveSubset
 from .longtail import create_imbalanced_dataset
-from .skin_dataset import ISIC2016, ISIC2019
 from .transformations import get_transform
 
 
@@ -42,6 +38,8 @@ class TimeSeriesDM(BaseDataModule):
         seed: int = 12345,
         persistent_workers: bool = True,
         imbalance: bool = False,
+        imb_type: str = "exp",
+        imb_factor: float = 0.02,
         timeout: int = 0,
         val_size: Optional[int] = None,
         balanced_sampling: bool = False,
@@ -82,6 +80,8 @@ class TimeSeriesDM(BaseDataModule):
             transform_test, self.mean, self.std, self.shape
         )
         self.imbalance = imbalance
+        self.imb_type = imb_type
+        self.imb_factor = imb_factor
         self.balanced_test_val = balanced_test_val
 
         ### IMPLEMENTATION ###
@@ -99,8 +99,9 @@ class TimeSeriesDM(BaseDataModule):
         if not self.shuffle:
             raise ValueError("shuffle flag has to be set to true")
 
-    def _stratified_3way_split(self, labels, n_total, test_size, val_size,
-                               balanced_eval: bool = False):
+    def _stratified_3way_split(
+        self, labels, n_total, test_size, val_size, balanced_eval: bool = False
+    ):
         """Return (test_idx, val_idx, pool_idx) with stratification by class label.
 
         When balanced_eval=True, test and val receive equal numbers of samples
@@ -113,24 +114,36 @@ class TimeSeriesDM(BaseDataModule):
         n_classes = len(classes)
 
         if balanced_eval:
+            counts = np.array([np.sum(labels == c) for c in classes])
+            max_eval_per_class = counts.min()
             n_test_per_class = max(1, test_size // n_classes)
-            n_val_per_class  = max(1, val_size  // n_classes)
+            n_val_per_class = max(1, val_size // n_classes)
+            if n_test_per_class + n_val_per_class > max_eval_per_class:
+                eval_per_class = int(max_eval_per_class)
+                test_ratio = n_test_per_class / (n_test_per_class + n_val_per_class)
+                n_test_per_class = max(1, int(round(eval_per_class * test_ratio)))
+                n_val_per_class = max(0, eval_per_class - n_test_per_class)
 
         for c in classes:
             c_idx = np.where(labels == c)[0]
             rng.shuffle(c_idx)
             if balanced_eval:
-                n_test = min(n_test_per_class, len(c_idx) // 3)
-                n_val  = min(n_val_per_class,  (len(c_idx) - n_test) // 3)
+                n_test = n_test_per_class
+                n_val = n_val_per_class
             else:
                 n_test = max(1, round(len(c_idx) * test_size / n_total))
-                n_val  = max(1, round(len(c_idx) * val_size  / n_total))
+                n_val = max(1, round(len(c_idx) * val_size / n_total))
+                if n_test + n_val >= len(c_idx):
+                    n_test = max(1, min(n_test, len(c_idx) - 2))
+                    n_val = max(1, min(n_val, len(c_idx) - n_test - 1))
             test_idx.append(c_idx[:n_test])
-            val_idx.append( c_idx[n_test:n_test + n_val])
+            val_idx.append(c_idx[n_test:n_test + n_val])
             pool_idx.append(c_idx[n_test + n_val:])
-        return (np.concatenate(test_idx),
-                np.concatenate(val_idx),
-                np.concatenate(pool_idx))
+        return (
+            np.concatenate(test_idx),
+            np.concatenate(val_idx),
+            np.concatenate(pool_idx),
+        )
 
     def _setup_datasets(self):
         """Creates the active training dataset and validation and test datasets"""
@@ -146,7 +159,11 @@ class TimeSeriesDM(BaseDataModule):
             _ecg_labels    = self.dataset_cls(root=_ecg_root_tmp, split="all").targets
             _ecg_n_total   = len(_ecg_labels)
             _ecg_test_idx, _ecg_val_idx, _ecg_pool_idx = self._stratified_3way_split(
-                _ecg_labels, _ecg_n_total, _ecg_test_size, _ecg_val_size
+                _ecg_labels,
+                _ecg_n_total,
+                _ecg_test_size,
+                _ecg_val_size,
+                balanced_eval=self.balanced_test_val,
             )
 
         if self.dataset in ("p12", "p12_transformer"):
@@ -160,15 +177,6 @@ class TimeSeriesDM(BaseDataModule):
                 _p12_labels, _p12_n_total, _p12_test_size, _p12_val_size,
                 balanced_eval=self.balanced_test_val,
             )
-
-        # ------------------------------------------------------------------ #
-        # For standard TorchVision datasets, ensure they are downloaded.      #
-        # ------------------------------------------------------------------ #
-        if self.dataset not in ("ecg5000", "p12", "p12_transformer"):
-            try:
-                self.dataset_cls(root=self.data_root, download=False)
-            except:  # Error is assumed here to stem from data not being present.
-                self.dataset_cls(root=self.data_root, download=True)
 
         # ------------------------------------------------------------------ #
         # Build train (pool) set                                               #
@@ -185,7 +193,7 @@ class TimeSeriesDM(BaseDataModule):
 
         if self.imbalance:
             self.train_set = create_imbalanced_dataset(
-                self.train_set, imb_type="exp", imb_factor=0.02
+                self.train_set, imb_type=self.imb_type, imb_factor=self.imb_factor
             )
 
         if self.active:
@@ -211,8 +219,6 @@ class TimeSeriesDM(BaseDataModule):
             _p12_full_eval = self.dataset_cls(root=_p12_root)
             self.val_set   = Subset(_p12_full_eval, _p12_val_idx)
             self.test_set  = Subset(_p12_full_eval, _p12_test_idx)
-
-        self.val_set = self._split_dataset(self.val_set, train=False)
 
     def train_dataloader(self) -> DataLoader:
         return self.get_dataloader(self.train_set, mode="train")

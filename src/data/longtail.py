@@ -19,12 +19,9 @@ def create_imbalanced_dataset(
     Returns:
         ActiveSubset: Imbalanced dataset class
     """
-    targets = dataset.targets
-    num_classes = len(np.unique(targets))
-    num_samples = len(dataset)
-    img_num_per_cls = _get_samples_per_cls(
-        num_samples, num_classes, imb_type, imb_factor
-    )
+    targets = np.asarray(dataset.targets)
+    _, counts = np.unique(targets, return_counts=True)
+    img_num_per_cls = _get_samples_per_cls(counts, imb_type, imb_factor)
     imb_dataset, class_dict = gen_imbalanced_data(dataset, img_num_per_cls)
     for key in class_dict:
         print("Class {} : #Samples {}".format(key, class_dict[key]))
@@ -32,33 +29,33 @@ def create_imbalanced_dataset(
 
 
 def _get_samples_per_cls(
-    num_samples: int, cls_num: int, imb_type: str, imb_factor: float
+    counts: np.ndarray, imb_type: str, imb_factor: float
 ) -> List[int]:
-    """Computes the amount of samples for each class given a balanced dataset and an imbalance setting.
+    """Computes the amount of samples for each class given an imbalance setting.
 
     Args:
-        num_samples (int): number of samples for
-        cls_num (int): number of classes
+        counts (np.ndarray): number of available samples per class
         imb_type (str): exp, step, balanced
         imb_factor (float): #samples_min/ #samples_max
 
     Returns:
         List[int]: [#samples_max, ... #samples_min]
     """
-    img_max = num_samples / cls_num
-    assert img_max % 1 == 0  # this function only works for balanced datasets!
+    cls_num = len(counts)
+    img_max = int(counts.max())
+    img_min = int(counts.min())
     img_num_per_cls = []
     if imb_type == "exp":
         for cls_idx in range(cls_num):
-            num = img_max * (imb_factor ** (cls_idx / (cls_num - 1.0)))
-            img_num_per_cls.append(int(num))
+            exponent = cls_idx / (cls_num - 1.0) if cls_num > 1 else 0
+            num = img_max * (imb_factor ** exponent)
+            img_num_per_cls.append(min(max(1, int(num)), int(counts[cls_idx])))
     elif imb_type == "step":
-        for cls_idx in range(cls_num // 2):
-            img_num_per_cls.append(int(img_max))
-        for cls_idx in range(cls_num // 2):
-            img_num_per_cls.append(int(img_max * imb_factor))
+        for cls_idx in range(cls_num):
+            num = img_max if cls_idx < cls_num // 2 else img_max * imb_factor
+            img_num_per_cls.append(min(max(1, int(num)), int(counts[cls_idx])))
     elif imb_type == "balanced":
-        img_num_per_cls.extend([int(img_max)] * cls_num)
+        img_num_per_cls.extend([img_min] * cls_num)
     else:
         raise NotImplementedError
     return img_num_per_cls
@@ -68,7 +65,7 @@ def gen_imbalanced_data(
     dataset: ActiveSubset, img_num_per_cls: List[int]
 ) -> Tuple[ActiveSubset, dict]:
     targets = [y for x, y in dataset]
-    targets_np = np.array(targets, dtype=np.int)
+    targets_np = np.array(targets, dtype=int)
     classes = np.unique(targets_np)
 
     num_per_cls_dict = dict()

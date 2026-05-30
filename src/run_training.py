@@ -7,6 +7,7 @@ from omegaconf import DictConfig, OmegaConf
 import utils
 from data.base_datamodule import BaseDataModule
 from data.data import TorchVisionDM
+from data.timeseriesdata import TimeSeriesDM
 from trainer import ActiveTrainingLoop
 from utils import config_utils
 from utils.log_utils import setup_logger
@@ -20,15 +21,15 @@ def main(cfg: DictConfig):
     train(cfg)
 
 
-def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> TorchVisionDM:
-    """Initialize TorchVisionDM from config.
+def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> BaseDataModule:
+    """Initialize the configured DataModule.
 
     Args:
         config (DictConfig): Config obtained
         active_dataset (bool, optional): . Defaults to True.
 
     Returns:
-        TorchVisionDM: DataModule used for training.
+        BaseDataModule: DataModule used for training.
     """
     balanced_sampling = False
     if "balanced_sampling" in cfg.data:
@@ -37,6 +38,12 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> TorchVis
     imbalance = None
     if "imbalance" in cfg.data:
         imbalance = cfg.data.imbalance
+    imb_type = "exp"
+    if "type" in cfg.data:
+        imb_type = cfg.data.type
+    imb_factor = 0.02
+    if "rho" in cfg.data:
+        imb_factor = cfg.data.rho
     val_size = None
     if "val_size" in cfg.data:
         val_size = cfg.data.val_size
@@ -44,7 +51,10 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> TorchVis
     if "balanced_test_val" in cfg.data:
         balanced_test_val = cfg.data.balanced_test_val
 
-    datamodule = TorchVisionDM(
+    time_series_datasets = {"ecg5000", "p12", "p12_transformer"}
+    dm_cls = TimeSeriesDM if cfg.data.name in time_series_datasets else TorchVisionDM
+
+    datamodule = dm_cls(
         data_root=cfg.trainer.data_root,
         batch_size=cfg.trainer.batch_size,
         dataset=cfg.data.name,
@@ -62,6 +72,8 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> TorchVis
         active=active_dataset,
         persistent_workers=cfg.trainer.persistent_workers,
         imbalance=imbalance,
+        imb_type=imb_type,
+        imb_factor=imb_factor,
         timeout=cfg.trainer.timeout,
         val_size=val_size,
         balanced_sampling=balanced_sampling,

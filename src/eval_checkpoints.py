@@ -20,10 +20,10 @@ evaluation performed during training:
       rebuild the model (architecture, num_classes, dropout, k …) and the
       datamodule (data_root, seed, val_split, random_split …).
 
-The test split is deterministic: TorchVisionDM uses the seed from the config
-and random_split=True, so the same indices are held out across every loop of
-a given run (see data/base_datamodule.py setup()).  We therefore do NOT need
-to restore data_ckpt.pkl; we only need the test dataloader.
+The test split is deterministic: the datamodule factory uses the seed from
+the config, so the same indices are held out across every loop of a given run.
+We therefore do NOT need to restore data_ckpt.pkl; we only need the test
+dataloader.
 
 After loading the checkpoint the forward pass mirrors what _test() /
 test_step() do in training:
@@ -117,7 +117,7 @@ def load_model(hparams_path: Path, ckpt_path: Path) -> BayesianModule:
 
 
 def build_test_loader(cfg, batch_size: int = 256):
-    """Create TorchVisionDM and return its test DataLoader.
+    """Create the configured DataModule and return its test DataLoader.
 
     get_torchvision_dm (run_training.py:23) is the same factory used by
     main.py:active_loop.  Passing active=False skips the ActiveLearningDataset
