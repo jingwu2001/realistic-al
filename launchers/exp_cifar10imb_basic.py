@@ -5,13 +5,13 @@ from launcher import ExperimentLauncher
 config_dict = {
     "model": "resnet",
     "query": [
-        "vendi",
-        "random",
+        # "vendi",
+        # "random",
         "entropy",
         "kcentergreedy",
         "bald",
         "badge",
-        "bandit"
+        # "bandit"
     ],
     "data": ["cifar10_imb"],
     "active": [
@@ -27,7 +27,8 @@ hparam_dict = {
     "data.val_size": [50 * 5, 250 * 5, None],
     # "data.val_size": [50 * 5, 250 * 5],
     # "data.val_size": [50 * 5],
-    "trainer.seed": [12345, 12346, 12347],
+    # "trainer.seed": [12345, 12346, 12347],
+    "trainer.seed": [12345],
     "trainer.max_epochs": 200,
     "model.weight_decay": 5e-3,
     "model.dropout_p": [0.5] * len(config_dict["query"]),
