@@ -40,12 +40,15 @@ hparam_dict = {
     "trainer.batch_size": 64,
     "trainer.precision": 32,
     "trainer.deterministic": True,
+    "data.imbalance": [False, True],
+    "data.imb_factor": [0.02, 0.02],
 }
 
-naming_conv = "{data}/active-{active}/model-{model}_drop-{model.dropout_p}_acq-{query}_ep-{trainer.max_epochs}_bs-{data.balanced_sampling}_wl-{model.weighted_loss}"
+naming_conv = "{data}/active-{active}/model-{model}_drop-{model.dropout_p}_acq-{query}_ep-{trainer.max_epochs}_bs-{data.balanced_sampling}_wl-{model.weighted_loss}_imb-{data.imbalance}_imbf-{data.imb_factor}"
 
 joint_iteration = [
     ["model.dropout_p", "query"],
+    ["data.imbalance", "data.imb_factor"],
 ]
 
 path_to_ex_file = "src/main.py"
