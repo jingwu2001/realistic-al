@@ -107,6 +107,8 @@ class TimeSeriesDM(BaseDataModule):
         When balanced_eval=True, test and val receive equal numbers of samples
         per class (limited by the minority class), so eval sets are 50/50.
         The pool receives all remaining samples and may still be imbalanced.
+
+        When balanced_eval=True, reserve the test and train labeled for them first.
         """
         rng = np.random.default_rng(self.seed)
         test_idx, val_idx, pool_idx = [], [], []
@@ -115,14 +117,10 @@ class TimeSeriesDM(BaseDataModule):
 
         if balanced_eval:
             counts = np.array([np.sum(labels == c) for c in classes])
-            max_eval_per_class = counts.min()
             n_test_per_class = max(1, test_size // n_classes)
             n_val_per_class = max(1, val_size // n_classes)
-            if n_test_per_class + n_val_per_class > max_eval_per_class:
-                eval_per_class = int(max_eval_per_class)
-                test_ratio = n_test_per_class / (n_test_per_class + n_val_per_class)
-                n_test_per_class = max(1, int(round(eval_per_class * test_ratio)))
-                n_val_per_class = max(0, eval_per_class - n_test_per_class)
+            assert n_test_per_class + n_val_per_class > max_eval_per_class, \
+                f"Not enough sample in for balanced val and test sets under specified test_size {test_size} and val_size {val_size}"
 
         for c in classes:
             c_idx = np.where(labels == c)[0]
