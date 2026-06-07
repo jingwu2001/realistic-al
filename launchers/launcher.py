@@ -173,6 +173,10 @@ class BaseLauncher:
             "--test", action="store_true", help="Quick smoke test: 2 AL iterations, 3 epochs"
         )
         parser.add_argument(
+            "--dry-run", action="store_true", dest="dry_run",
+            help="Print label distributions and exit before training/querying"
+        )
+        parser.add_argument(
             "--notes", default="", type=str, help="Notes to attach to the wandb run"
         )
         return parser
@@ -197,6 +201,8 @@ class BaseLauncher:
         if launcher_args.test:
             hparam_dict["trainer.max_epochs"] = 10
             hparam_dict["trainer.is_test"] = True
+        if getattr(launcher_args, "dry_run", False):
+            hparam_dict["trainer.dry_run"] = True
         return config_dict, hparam_dict
 
     def parse_product(self) -> list:
@@ -300,16 +306,21 @@ class BaseLauncher:
             if getattr(self.launcher_args, "notes", ""):
                 import shlex
                 full_args += f" ++trainer.wandb_notes={shlex.quote(self.launcher_args.notes)}"
+            if getattr(self.launcher_args, "dry_run", False):
+                full_args += " ++trainer.experiments_root=/tmp/dry_run"
             launch_command = f"{self.ex_call} {self.path_to_ex_file} {full_args}"
 
             print(launch_command)
             if not self.launcher_args.debug:
-                log_dir = os.path.join(experiment_root, "activelearning", experiment_name)
-                os.makedirs(log_dir, exist_ok=True)
-                log_path = os.path.join(log_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + ".log")
-                print(f"Logging to: {log_path}")
-                with open(log_path, "w") as log_file:
-                    subprocess.run(launch_command, shell=True, check=True, stdout=log_file, stderr=log_file)
+                if getattr(self.launcher_args, "dry_run", False):
+                    subprocess.run(launch_command, shell=True, check=True, env=os.environ)
+                else:
+                    log_dir = os.path.join(experiment_root, "activelearning", experiment_name)
+                    os.makedirs(log_dir, exist_ok=True)
+                    log_path = os.path.join(log_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + ".log")
+                    print(f"Logging to: {log_path}")
+                    with open(log_path, "w") as log_file:
+                        subprocess.run(launch_command, shell=True, check=True, stdout=log_file, stderr=log_file)
 
     @staticmethod
     def dict_to_arg(
