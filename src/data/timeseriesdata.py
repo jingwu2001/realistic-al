@@ -119,8 +119,8 @@ class TimeSeriesDM(BaseDataModule):
             counts = np.array([np.sum(labels == c) for c in classes])
             n_test_per_class = max(1, test_size // n_classes)
             n_val_per_class = max(1, val_size // n_classes)
-            assert n_test_per_class + n_val_per_class > max_eval_per_class, \
-                f"Not enough sample in for balanced val and test sets under specified test_size {test_size} and val_size {val_size}"
+            assert min(counts) >= n_test_per_class + n_val_per_class, \
+                f"Not enough samples for balanced val and test sets: min class count={min(counts)}, need {n_test_per_class + n_val_per_class} per class (test_size={test_size}, val_size={val_size})"
 
         for c in classes:
             c_idx = np.where(labels == c)[0]
@@ -253,19 +253,25 @@ if __name__ == "__main__":
         test_loader   = dm.test_dataloader()
         pool_loader   = dm.pool_dataloader()
 
+        def _x_shape(xb):
+            if isinstance(xb, (list, tuple)):
+                return [tuple(t.shape) if hasattr(t, 'shape') else t for t in xb]
+            return tuple(xb.shape)
+
         xb, yb = next(iter(train_loader))
-        print(f"  Train batch x: {tuple(xb.shape)}  y: {tuple(yb.shape)}")
-        assert xb.dtype == torch.float32, "x must be float32"
+        print(f"  Train batch x: {_x_shape(xb)}  y: {tuple(yb.shape)}")
+        if not isinstance(xb, (list, tuple)):
+            assert xb.dtype == torch.float32, "x must be float32"
         assert yb.dtype == torch.int64,   "y must be int64"
 
         xb, yb = next(iter(val_loader))
-        print(f"  Val   batch x: {tuple(xb.shape)}  y: {tuple(yb.shape)}")
+        print(f"  Val   batch x: {_x_shape(xb)}  y: {tuple(yb.shape)}")
 
         xb, yb = next(iter(test_loader))
-        print(f"  Test  batch x: {tuple(xb.shape)}  y: {tuple(yb.shape)}")
+        print(f"  Test  batch x: {_x_shape(xb)}  y: {tuple(yb.shape)}")
 
         xb, yb = next(iter(pool_loader))
-        print(f"  Pool  batch x: {tuple(xb.shape)}  y: {tuple(yb.shape)}")
+        print(f"  Pool  batch x: {_x_shape(xb)}  y: {tuple(yb.shape)}")
 
         # Pool index round-trip
         dm.pool_dataloader(m=20)
@@ -309,6 +315,8 @@ if __name__ == "__main__":
             dist = {int(c): f"{int(n)} ({100*n/total:.1f}%)" for c, n in zip(classes, counts)}
             print(f"  {split_name:4s} (n={total:5d}): {dist}")
 
+    # P12: n=11988, minority class (1)=1707; 10% test = 599/class.
+    # val_split=0.1 gives 599/class → safe for balanced splits (598+599=1197 ≤ 1707).
     _P12_KWARGS = dict(
         data_root=data_root,
         dataset="p12",
@@ -321,18 +329,82 @@ if __name__ == "__main__":
         batch_size=64,
         num_workers=0,
         persistent_workers=False,
+        val_split=0.1,
     )
+    _P12_BALANCED_KWARGS = _P12_KWARGS
 
+    # ------------------------------------------------------------------ #
+    # _check_dm tests for P12 and P12Transformer                          #
+    # ------------------------------------------------------------------ #
+    dm_p12 = TimeSeriesDM(**_P12_KWARGS)
+    _check_dm("P12", dm_p12, n_label=50)
+
+    dm_p12t = TimeSeriesDM(**{**_P12_KWARGS, "dataset": "p12_transformer"})
+    _check_dm("P12Transformer", dm_p12t, n_label=50)
+
+    # ------------------------------------------------------------------ #
+    # Distribution checks across balanced/imbalanced combos               #
+    # ------------------------------------------------------------------ #
     for btv in (True, False):
+        kwargs = _P12_BALANCED_KWARGS if btv else _P12_KWARGS
         _dist(
             f"balanced_test_val={btv}  |  no long tail",
-            TimeSeriesDM(**_P12_KWARGS, balanced_test_val=btv),
+            TimeSeriesDM(**kwargs, balanced_test_val=btv),
         )
         for factor in (0.02, 0.01):
             _dist(
                 f"balanced_test_val={btv}  |  long tail exp imb_factor={factor}",
-                TimeSeriesDM(**_P12_KWARGS, balanced_test_val=btv,
+                TimeSeriesDM(**kwargs, balanced_test_val=btv,
                              imbalance=True, imb_type="exp", imb_factor=factor),
             )
 
     print("\nAll checks passed.")
+
+    # ------------------------------------------------------------------ #
+    # Launcher smoke-test: label distributions as main.py would log them  #
+    # Mirrors exp_p12_transformer_baleval_bal / _imb with imbalance on/off#
+    # ------------------------------------------------------------------ #
+    def _full_dist(label, dm, n_label, balanced_init):
+        import copy
+        dm2 = copy.deepcopy(dm)
+        dm2.train_set.label_randomly(n_label, balanced=balanced_init)
+        ts = dm2.train_set
+
+        def _d(tgts, name):
+            tgts = np.asarray(tgts)
+            classes, counts = np.unique(tgts, return_counts=True)
+            total = len(tgts)
+            parts = [f"{int(c)}: {int(n)} ({100*n/total:.1f}%)" for c, n in zip(classes, counts)]
+            print(f"  {name:<6}: n={total}  " + "  ".join(parts))
+
+        print(f"\n{'='*65}")
+        print(f"  {label}")
+        print(f"{'='*65}")
+        _d(ts.labelled_dataset.targets, "L")
+        _d(ts.pool.targets,             "U")
+        _d(ts._dataset.targets,         "L+U")
+        _d(np.asarray(dm2.val_set.dataset.targets)[dm2.val_set.indices],   "val")
+        _d(np.asarray(dm2.test_set.dataset.targets)[dm2.test_set.indices], "test")
+
+    _P12T_BASE = dict(
+        data_root=data_root,
+        dataset="p12_transformer",
+        shape=[215, 36], num_classes=2,
+        mean=[0.0], std=[1.0],
+        transform_train="basic", transform_test="basic",
+        val_split=0.1, balanced_test_val=True,
+        num_workers=0, persistent_workers=False,
+    )
+
+    for imb, factor in [(False, None), (True, 0.02)]:
+        kwargs = dict(**_P12T_BASE)
+        if imb:
+            kwargs.update(imbalance=True, imb_factor=factor)
+        dm_base = TimeSeriesDM(**kwargs)
+        for bal_init, active_cfg in [(True, "p12_med_bal"), (False, "p12_med")]:
+            _full_dist(
+                f"imbalance={imb} imb_factor={factor}  |  active={active_cfg}  balanced_init={bal_init}",
+                dm_base, n_label=100, balanced_init=bal_init,
+            )
+
+    print("\nLauncher smoke-test passed.")
