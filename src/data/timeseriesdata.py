@@ -295,10 +295,23 @@ if __name__ == "__main__":
     )
     _check_dm("ECG5000", dm_ecg, n_label=200)
 
-    # ------------------------------------------------------------------ #
-    # P12                                                                  #
-    # ------------------------------------------------------------------ #
-    dm_p12 = TimeSeriesDM(
+    def _dist(label, dm):
+        """Print label distribution for pool, val, and test."""
+        print(f"\n{'='*60}")
+        print(f"  {label}")
+        print(f"{'='*60}")
+        pool_targets = dm.train_set._dataset.targets
+        for split_name, ys in [
+            ("pool", pool_targets),
+            ("val",  np.array(dm.val_set.dataset.targets)[dm.val_set.indices]),
+            ("test", np.array(dm.test_set.dataset.targets)[dm.test_set.indices]),
+        ]:
+            classes, counts = np.unique(ys, return_counts=True)
+            total = len(ys)
+            dist = {int(c): f"{int(n)} ({100*n/total:.1f}%)" for c, n in zip(classes, counts)}
+            print(f"  {split_name:4s} (n={total:5d}): {dist}")
+
+    _P12_KWARGS = dict(
         data_root=data_root,
         dataset="p12",
         shape=[3, 33, 49],
@@ -311,6 +324,17 @@ if __name__ == "__main__":
         num_workers=0,
         persistent_workers=False,
     )
-    _check_dm("P12", dm_p12, n_label=200)
+
+    for btv in (True, False):
+        _dist(
+            f"balanced_test_val={btv}  |  no long tail",
+            TimeSeriesDM(**_P12_KWARGS, balanced_test_val=btv),
+        )
+        for factor in (0.02, 0.01):
+            _dist(
+                f"balanced_test_val={btv}  |  long tail exp imb_factor={factor}",
+                TimeSeriesDM(**_P12_KWARGS, balanced_test_val=btv,
+                             imbalance=True, imb_type="exp", imb_factor=factor),
+            )
 
     print("\nAll checks passed.")
