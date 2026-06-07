@@ -41,8 +41,11 @@ def main(cfg: DictConfig):
         bandit_context_dim = bandit_config.context_dim if "bandit" in cfg.query and "context_dim" in bandit_config else 4
         bandit_manager = BanditManager(context_dim=bandit_context_dim, alpha=bandit_alpha)
 
+    if cfg.trainer.dry_run:
+        logger.info("dry_run=True: skipping wandb init and training")
+
     wandb_run = None
-    if cfg.trainer.use_wandb:
+    if cfg.trainer.use_wandb and not cfg.trainer.dry_run:
         hydra_choices = HydraConfig.get().runtime.choices
         active_name = hydra_choices.get("active", "")
         commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).strip().decode()
@@ -145,6 +148,56 @@ def active_loop(
     logger.info("Instantiating Datamodule")
     datamodule = get_active_dm_from_config(cfg)
     label_active_dm(cfg, num_labelled, balanced, datamodule)
+
+    def _label_dist(targets) -> str:
+        tgts = np.asarray(targets)
+        classes, counts = np.unique(tgts, return_counts=True)
+        total = len(tgts)
+        parts = [f"{int(c)}: {int(n)} ({100*n/total:.1f}%)" for c, n in zip(classes, counts)]
+        return f"n={total}  " + "  ".join(parts)
+
+    def _dist_counts(targets) -> dict:
+        tgts = np.asarray(targets)
+        classes, counts = np.unique(tgts, return_counts=True)
+        total = len(tgts)
+        d = {"n": int(total)}
+        for c, n in zip(classes, counts):
+            d[f"class_{int(c)}_count"] = int(n)
+            d[f"class_{int(c)}_pct"] = round(100 * n / total, 2)
+        return d
+
+    def _subset_targets(subset):
+        return np.asarray(subset.dataset.targets)[subset.indices]
+
+    ts = datamodule.train_set
+    logger.info(
+        "Label distribution before training:\n"
+        "  L     : {}\n"
+        "  U     : {}\n"
+        "  L+U   : {}\n"
+        "  val   : {}\n"
+        "  test  : {}",
+        _label_dist(ts.labelled_set.targets),
+        _label_dist(ts.pool.targets),
+        _label_dist(ts._dataset.targets),
+        _label_dist(_subset_targets(datamodule.val_set)),
+        _label_dist(_subset_targets(datamodule.test_set)),
+    )
+
+    if wandb_run is not None:
+        for split, tgts in [
+            ("L",   ts.labelled_set.targets),
+            ("U",   ts.pool.targets),
+            ("L+U", ts._dataset.targets),
+            ("val", _subset_targets(datamodule.val_set)),
+            ("test", _subset_targets(datamodule.test_set)),
+        ]:
+            for k, v in _dist_counts(tgts).items():
+                wandb_run.summary[f"init_label_dist/{split}/{k}"] = v
+
+    if cfg.trainer.dry_run:
+        logger.info("dry_run=True: exiting before training")
+        return
 
     if num_iter == 0:
         num_iter = math.ceil(len(datamodule.train_set) / acq_size)
