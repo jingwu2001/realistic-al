@@ -1,15 +1,11 @@
 import math
 import os
-import subprocess
 import time
 from typing import Callable
-
-import wandb
 
 import hydra
 import numpy as np
 import pandas as pd
-from hydra.core.hydra_config import HydraConfig
 from loguru import logger
 from omegaconf import DictConfig
 
@@ -21,6 +17,7 @@ from query.bandit import BanditManager
 from utils import config_utils
 from utils.timer import Timer
 from utils.log_utils import setup_logger
+from utils.wandb_utils import init_wandb, log_al_iteration, log_label_distributions
 
 
 @hydra.main(config_path="./config", config_name="config", version_base="1.1")
@@ -44,33 +41,7 @@ def main(cfg: DictConfig):
     if cfg.trainer.dry_run:
         logger.info("dry_run=True: skipping wandb init and training")
 
-    wandb_run = None
-    if cfg.trainer.use_wandb and not cfg.trainer.dry_run:
-        hydra_choices = HydraConfig.get().runtime.choices
-        active_name = hydra_choices.get("active", "")
-        commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).strip().decode()
-        _eid = cfg.trainer.experiment_id  # "2026-05-23_18-53-00-411537"
-        date_str = _eid[:10].replace("-", "")   # "20260523"
-        time_str = _eid[11:19].replace("-", "")  # "185300"
-        session_tag = f"{date_str}-{time_str}_{commit}"  # "20260523-185300_f8fe30ab"
-        wandb_run = wandb.init(
-            project=cfg.trainer.wandb_project,           # e.g. "realistic-al"
-            name=f"{cfg.query.name}/seed-{cfg.trainer.seed}",  # e.g. "vendi/seed-12345"
-            group=f"{cfg.data.name}/{active_name}/{cfg.query.name}",  # e.g. "cifar10_imb/cifar10_low/vendi"
-            tags=[cfg.data.name, active_name, cfg.query.name, session_tag] + (["test"] if cfg.trainer.is_test else []),  # e.g. ["cifar10_imb", "cifar10_low", "vendi", "20260523_f8fe30ab"]
-            notes=str(cfg.trainer.wandb_notes) or None,    # e.g. "run on hpc"
-            config={
-                "query": cfg.query.name,
-                "model": cfg.model.name,
-                "data": cfg.data.name,
-                "active": active_name,
-                "seed": cfg.trainer.seed,
-                "num_labelled": cfg.active.num_labelled,
-                "acq_size": cfg.active.acq_size,
-                "num_iter": cfg.active.num_iter,
-            },
-        )
-        wandb_run.define_metric("al/*", step_metric="al_iter")
+    wandb_run = init_wandb(cfg)
 
     exit_code = 0
     try:
@@ -91,32 +62,6 @@ def main(cfg: DictConfig):
     finally:
         if wandb_run is not None:
             wandb_run.finish(exit_code=exit_code)
-
-
-def _read_loop_metrics(log_dir) -> dict:
-    """Return al/-prefixed metrics from a loop's metrics.csv, aggregated per AL iteration.
-
-    val/* → max across epochs (best checkpoint value)
-    train/* and test/* → last non-NaN value
-    """
-    try:
-        df = pd.read_csv(os.path.join(log_dir, "metrics.csv"))
-        result = {}
-        for col in df.columns:
-            if col in ("epoch", "step"):
-                continue
-            series = df[col].dropna()
-            if series.empty:
-                continue
-            if col.startswith("val/"):
-                val = series.max()
-            else:
-                val = series.iloc[-1]
-            result[f"al/{col.replace('/', '_')}"] = val
-        return result
-    except Exception:
-        pass
-    return {}
 
 
 @logger.catch
@@ -156,16 +101,6 @@ def active_loop(
         parts = [f"{int(c)}: {int(n)} ({100*n/total:.1f}%)" for c, n in zip(classes, counts)]
         return f"n={total}  " + "  ".join(parts)
 
-    def _dist_counts(targets) -> dict:
-        tgts = np.asarray(targets)
-        classes, counts = np.unique(tgts, return_counts=True)
-        total = len(tgts)
-        d = {"n": int(total)}
-        for c, n in zip(classes, counts):
-            d[f"class_{int(c)}_count"] = int(n)
-            d[f"class_{int(c)}_pct"] = round(100 * n / total, 2)
-        return d
-
     def _subset_targets(subset):
         return np.asarray(subset.dataset.targets)[subset.indices]
 
@@ -184,16 +119,7 @@ def active_loop(
         _label_dist(_subset_targets(datamodule.test_set)),
     )
 
-    if wandb_run is not None:
-        for split, tgts in [
-            ("L",   ts.labelled_set.targets),
-            ("U",   ts.pool.targets),
-            ("L+U", ts._dataset.targets),
-            ("val", _subset_targets(datamodule.val_set)),
-            ("test", _subset_targets(datamodule.test_set)),
-        ]:
-            for k, v in _dist_counts(tgts).items():
-                wandb_run.summary[f"init_label_dist/{split}/{k}"] = v
+    log_label_distributions(wandb_run, datamodule)
 
     if cfg.trainer.dry_run:
         logger.info("dry_run=True: exiting before training")
@@ -252,10 +178,9 @@ def active_loop(
                 f"acq_size={acq_size}). Stopping early and saving results."
             )
             timing_records.append({"iteration": i, "train_time_s": round(train_timer.elapsed, 4), "query_time_s": float("nan"), "eig_time_s": float("nan")})
-            if wandb_run is not None:
-                log_dict = {"al_iter": i, "al/n_labelled": cfg.active.num_labelled, "al/train_time_s": round(train_timer.elapsed, 4)}
-                log_dict.update(_read_loop_metrics(training_loop.log_dir))
-                wandb_run.log(log_dict)
+            log_al_iteration(
+                wandb_run, i, cfg, train_timer, log_dir=training_loop.log_dir
+            )
             del training_loop
             break
 
@@ -275,16 +200,11 @@ def active_loop(
                 
         datamodule.train_set.label(active_store.requests)
         active_stores.append(active_store)
-        if wandb_run is not None:
-            log_dict = {
-                "al_iter": i,
-                "al/n_labelled": cfg.active.num_labelled,
-                "al/train_time_s": round(train_timer.elapsed, 4),
-                "al/query_time_s": round(query_timer.elapsed, 4),
-                "al/eig_time_s": eig_time,
-            }
-            log_dict.update(_read_loop_metrics(training_loop.log_dir))
-            wandb_run.log(log_dict)
+        log_al_iteration(
+            wandb_run, i, cfg, train_timer,
+            query_timer=query_timer, eig_time=eig_time,
+            log_dir=training_loop.log_dir, extra_info=active_store.extra_info,
+        )
         cfg.active.num_labelled += cfg.active.acq_size
         logger.info("Finalized Loop {}".format(i))
         del training_loop

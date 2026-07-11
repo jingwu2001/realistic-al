@@ -149,6 +149,9 @@ class ActiveTrainingLoop(object):
         )
         loggers = [tb_logger, csv_logger]
         if self.wandb_run is not None:
+            # A fresh WandbLogger is created per AL iteration, but passing the
+            # existing run via `experiment=` reuses that run object (no new
+            # wandb.init), so the run's step counter is not reset between loops.
             wandb_logger = pl.loggers.WandbLogger(experiment=self.wandb_run)
             loggers.append(wandb_logger)
         return loggers
