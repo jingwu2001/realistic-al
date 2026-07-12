@@ -130,9 +130,12 @@ def method_variant(cfg: DictConfig):
 
 
 def make_run_name(cfg: DictConfig) -> str:
-    """e.g. ``vendi-feat-rbf-minmax-q1.0/seed-12345``."""
+    """e.g. ``cifar10_imb/vendi-feat-rbf-minmax-q1.0/seed-12345``.
+
+    Well under wandb's 128-char run-name limit even for the longest variants.
+    """
     tag, _ = method_variant(cfg)
-    return f"{tag}/seed-{cfg.trainer.seed}"
+    return f"{cfg.data.name}/{tag}/seed-{cfg.trainer.seed}"
 
 
 def make_group(cfg: DictConfig, active_name: str) -> str:
@@ -323,7 +326,11 @@ def log_label_distributions(wandb_run, datamodule):
         return d
 
     def _subset_targets(subset):
-        return np.asarray(subset.dataset.targets)[subset.indices]
+        # val_set is a torch Subset (carved from train); test_set is often the
+        # raw dataset (e.g. CIFAR10/MNIST) with no .indices/.dataset.
+        if hasattr(subset, "indices") and hasattr(subset, "dataset"):
+            return np.asarray(subset.dataset.targets)[subset.indices]
+        return np.asarray(subset.targets)
 
     ts = datamodule.train_set
     for split, tgts in [

@@ -102,7 +102,11 @@ def active_loop(
         return f"n={total}  " + "  ".join(parts)
 
     def _subset_targets(subset):
-        return np.asarray(subset.dataset.targets)[subset.indices]
+        # val_set is a torch Subset (carved from train); test_set is often the
+        # raw dataset (e.g. CIFAR10/MNIST) with no .indices/.dataset.
+        if hasattr(subset, "indices") and hasattr(subset, "dataset"):
+            return np.asarray(subset.dataset.targets)[subset.indices]
+        return np.asarray(subset.targets)
 
     ts = datamodule.train_set
     logger.info(
