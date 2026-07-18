@@ -162,3 +162,7 @@ datasets/*
 *.tfevents.*
 
 misc/
+
+# experiment plot outputs / local pids
+analysis/plots_simple/
+*.pid
