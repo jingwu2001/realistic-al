@@ -43,6 +43,17 @@ def main(cfg: DictConfig):
 
     wandb_run = init_wandb(cfg)
 
+    if cfg.trainer.get("wandb_test", False):
+        # wandb wiring check: the run above carries the real name/group/tags/
+        # config; stop before any data loading, training, or acquisition.
+        # exit_code=1 marks the run "failed" on wandb so wiring checks are
+        # never mistaken for finished results runs (they are also tagged
+        # "wandb_test" for bulk deletion).
+        logger.info("wandb_test=True: wandb run created; exiting before data/training")
+        if wandb_run is not None:
+            wandb_run.finish(exit_code=1)
+        return
+
     exit_code = 0
     try:
         active_loop(

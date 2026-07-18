@@ -305,7 +305,8 @@ class BaseLauncher:
             full_args = config_args + param_args + " " + experiment_arg
             if getattr(self.launcher_args, "notes", ""):
                 import shlex
-                full_args += f" ++trainer.wandb_notes={shlex.quote(self.launcher_args.notes)}"
+                hydra_notes = self.launcher_args.notes.replace(",", "\\,")
+                full_args += f" ++trainer.wandb_notes={shlex.quote(hydra_notes)}"
             if getattr(self.launcher_args, "dry_run", False):
                 full_args += " ++trainer.experiments_root=/tmp/dry_run"
             launch_command = f"{self.ex_call} {self.path_to_ex_file} {full_args}"

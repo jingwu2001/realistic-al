@@ -26,3 +26,6 @@ wandb_project: realistic-al
 wandb_notes: ""
 is_test: False
 dry_run: False
+# create the wandb run (name/group/tags/config, extra tag "wandb_test") and
+# exit immediately — no data loading, training, or acquisition
+wandb_test: False

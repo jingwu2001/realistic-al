@@ -51,7 +51,7 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> BaseData
     if "balanced_test_val" in cfg.data:
         balanced_test_val = cfg.data.balanced_test_val
 
-    time_series_datasets = {"ecg5000", "p12", "p12_transformer"}
+    time_series_datasets = {"ecg5000", "p12", "p12_transformer", "mimic3_sand"}
     dm_cls = TimeSeriesDM if cfg.data.name in time_series_datasets else TorchVisionDM
 
     datamodule = dm_cls(

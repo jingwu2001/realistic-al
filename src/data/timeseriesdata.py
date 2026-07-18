@@ -6,6 +6,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from data.ecg5000_dataset import ECG5000Dataset
+from data.mimic_dataset import MIMIC3SandDataset
 from data.p12_dataset import P12Dataset, P12TransformerDataset
 
 from .active import ActiveLearningDataset
@@ -92,6 +93,8 @@ class TimeSeriesDM(BaseDataModule):
             self.dataset_cls = P12Dataset
         elif self.dataset == "p12_transformer":
             self.dataset_cls = P12TransformerDataset
+        elif self.dataset == "mimic3_sand":
+            self.dataset_cls = MIMIC3SandDataset
         else:
             raise NotImplementedError
         self._setup_datasets()
@@ -164,15 +167,18 @@ class TimeSeriesDM(BaseDataModule):
                 balanced_eval=self.balanced_test_val,
             )
 
-        if self.dataset in ("p12", "p12_transformer"):
-            _p12_root       = os.path.join(self.data_root, "P12data/processed_data")
-            _p12_labels     = self.dataset_cls(root=_p12_root).targets
-            _p12_n_total    = len(_p12_labels)
-            _p12_test_size  = max(1, round(0.1 * _p12_n_total))
-            _p12_val_size   = (self.val_split if isinstance(self.val_split, int)
-                               else max(1, round(self.val_split * _p12_n_total)))
-            _p12_test_idx, _p12_val_idx, _p12_pool_idx = self._stratified_3way_split(
-                _p12_labels, _p12_n_total, _p12_test_size, _p12_val_size,
+        if self.dataset in ("p12", "p12_transformer", "mimic3_sand"):
+            if self.dataset == "mimic3_sand":
+                _ts_root    = os.path.join(self.data_root, "mimic3_sand")
+            else:
+                _ts_root    = os.path.join(self.data_root, "P12data/processed_data")
+            _ts_labels      = self.dataset_cls(root=_ts_root).targets
+            _ts_n_total     = len(_ts_labels)
+            _ts_test_size   = max(1, round(0.1 * _ts_n_total))
+            _ts_val_size    = (self.val_split if isinstance(self.val_split, int)
+                               else max(1, round(self.val_split * _ts_n_total)))
+            _ts_test_idx, _ts_val_idx, _ts_pool_idx = self._stratified_3way_split(
+                _ts_labels, _ts_n_total, _ts_test_size, _ts_val_size,
                 balanced_eval=self.balanced_test_val,
             )
 
@@ -185,9 +191,9 @@ class TimeSeriesDM(BaseDataModule):
                 root=ecg_root, split="all", transform=self.train_transforms
             )
             self.train_set = ActiveSubset(_ecg_full_train, _ecg_pool_idx)
-        elif self.dataset in ("p12", "p12_transformer"):
-            _p12_full = self.dataset_cls(root=_p12_root)
-            self.train_set = ActiveSubset(_p12_full, _p12_pool_idx)
+        elif self.dataset in ("p12", "p12_transformer", "mimic3_sand"):
+            _ts_full = self.dataset_cls(root=_ts_root)
+            self.train_set = ActiveSubset(_ts_full, _ts_pool_idx)
 
         if self.imbalance:
             self.train_set = create_imbalanced_dataset(
@@ -195,8 +201,8 @@ class TimeSeriesDM(BaseDataModule):
             )
 
         if self.active:
-            if self.dataset in ("p12", "p12_transformer"):
-                # P12 datasets handle normalisation internally and have no transform attribute.
+            if self.dataset in ("p12", "p12_transformer", "mimic3_sand"):
+                # These datasets handle normalisation internally and have no transform attribute.
                 self.train_set = ActiveLearningDataset(self.train_set)
             else:
                 self.train_set = ActiveLearningDataset(
@@ -213,10 +219,10 @@ class TimeSeriesDM(BaseDataModule):
             )
             self.val_set  = Subset(_ecg_full_eval, _ecg_val_idx)
             self.test_set = Subset(_ecg_full_eval, _ecg_test_idx)
-        elif self.dataset in ("p12", "p12_transformer"):
-            _p12_full_eval = self.dataset_cls(root=_p12_root)
-            self.val_set   = Subset(_p12_full_eval, _p12_val_idx)
-            self.test_set  = Subset(_p12_full_eval, _p12_test_idx)
+        elif self.dataset in ("p12", "p12_transformer", "mimic3_sand"):
+            _ts_full_eval = self.dataset_cls(root=_ts_root)
+            self.val_set   = Subset(_ts_full_eval, _ts_val_idx)
+            self.test_set  = Subset(_ts_full_eval, _ts_test_idx)
 
     def train_dataloader(self) -> DataLoader:
         return self.get_dataloader(self.train_set, mode="train")

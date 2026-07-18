@@ -46,8 +46,24 @@ def _kernel_hp(vendi_cfg: DictConfig):
     (bandit inherits the ``vendi`` config block), so this is factored out and
     reused by both method-variant builders.
     """
-    emb = str(vendi_cfg.get("embedding", vendi_cfg.get("emb", "feat")))
+    # embedding tag from use_grad ("grad" = BADGE-style last-layer gradients,
+    # plus the embedding type when it deviates from the default full linear-
+    # layer gradient); an explicit `embedding`/`emb` key still wins.
+    if vendi_cfg.get("use_grad", False):
+        default_emb = "grad"
+        if str(vendi_cfg.get("grad_embedding_type", "linear")) != "linear":
+            default_emb += str(vendi_cfg.grad_embedding_type)
+    else:
+        default_emb = "feat"
+    emb = str(vendi_cfg.get("embedding", vendi_cfg.get("emb", default_emb)))
     kernel = _KERNEL_ABBR.get(str(vendi_cfg.kernel).lower(), str(vendi_cfg.kernel).lower())
+    if kernel == "rbf":
+        # gamma is an rbf sweep axis (float / "dim" / "median"); encode it in
+        # the kernel token so gamma variants don't collide in wandb run names
+        # (e.g. rbf1.0 / rbfdim / rbfmed)
+        gamma = str(vendi_cfg.get("gamma", "")).replace("median", "med")
+        if gamma:
+            kernel = f"rbf{gamma}"
     norm = _NORM_ABBR.get(str(vendi_cfg.normalization).lower(), str(vendi_cfg.normalization).lower())
     q = vendi_cfg.q
     return emb, kernel, norm, q
@@ -65,7 +81,9 @@ def _vendi_variant(cfg: DictConfig):
     v = cfg.query.vendi
     emb, kernel, norm, q = _kernel_hp(v)
 
-    tag = f"vendi-{emb}-{kernel}-{norm}-q{q}"
+    # gvendi shares this builder (same vendi block, use_grad=true); the query
+    # name keeps the variants distinct: vendi-feat-... vs gvendi-grad-...
+    tag = f"{cfg.query.name}-{emb}-{kernel}-{norm}-q{q}"
     hp = {"emb": emb, "kernel": kernel, "norm": norm, "q": str(q)}
 
     alpha = v.get("alpha", None)
@@ -117,6 +135,7 @@ def _bandit_variant(cfg: DictConfig):
 # fall through to the default and keep their short query name.
 _METHOD_VARIANT = {
     "vendi": _vendi_variant,
+    "gvendi": _vendi_variant,  # config alias of vendi (use_grad=true)
     "bandit": _bandit_variant,
 }
 
@@ -129,33 +148,41 @@ def method_variant(cfg: DictConfig):
     return fn(cfg)
 
 
-def make_run_name(cfg: DictConfig) -> str:
+def make_run_name(cfg: DictConfig, data_name: str = None) -> str:
     """e.g. ``cifar10_imb/vendi-feat-rbf-minmax-q1.0/seed-12345``.
+
+    ``data_name`` should be the hydra data-config choice (e.g.
+    ``p12_transformer_baleval``): several data configs share one
+    ``cfg.data.name`` (baleval vs natural split, cifar10 vs cifar10_imb),
+    which would otherwise collide in wandb.
 
     Well under wandb's 128-char run-name limit even for the longest variants.
     """
     tag, _ = method_variant(cfg)
-    return f"{cfg.data.name}/{tag}/seed-{cfg.trainer.seed}"
+    return f"{data_name or cfg.data.name}/{tag}/seed-{cfg.trainer.seed}"
 
 
-def make_group(cfg: DictConfig, active_name: str) -> str:
+def make_group(cfg: DictConfig, active_name: str, data_name: str = None) -> str:
     """e.g. ``cifar10_imb/cifar10_low/vendi-feat-rbf-minmax-q1.0``.
 
     Grouping by method-variant keeps a sweep from lumping all vendi variants
     together.
     """
     tag, _ = method_variant(cfg)
-    return f"{cfg.data.name}/{active_name}/{tag}"
+    return f"{data_name or cfg.data.name}/{active_name}/{tag}"
 
 
-def make_tags(cfg: DictConfig, active_name: str, session_tag: str) -> list:
+def make_tags(cfg: DictConfig, active_name: str, session_tag: str, data_name: str = None) -> list:
     """Build wandb tags: the coarse identity tags plus per-hyperparameter tags
     (``kernel:cos``, ``norm:l2``, ...) for cross-cutting filtering."""
     _, hp = method_variant(cfg)
-    tags = [cfg.data.name, active_name, cfg.query.name, session_tag]
+    tags = [data_name or cfg.data.name, active_name, cfg.query.name, session_tag]
     tags += [f"{k}:{val}" for k, val in hp.items()]
     if cfg.trainer.is_test:
         tags.append("test")
+    if cfg.trainer.get("wandb_test", False):
+        # wandb wiring checks: tagged so they can be bulk-selected and deleted
+        tags.append("wandb_test")
     return tags
 
 
@@ -174,6 +201,9 @@ def init_wandb(cfg: DictConfig):
 
     hydra_choices = HydraConfig.get().runtime.choices
     active_name = hydra_choices.get("active", "")
+    # the data-config choice (e.g. "p12_transformer_baleval", "cifar10_imb")
+    # distinguishes eval-split/imbalance variants that share cfg.data.name
+    data_name = hydra_choices.get("data", None) or cfg.data.name
 
     # git commit for the session tag; fall back gracefully outside a checkout
     # (e.g. a bare copy on a cluster).
@@ -206,7 +236,7 @@ def init_wandb(cfg: DictConfig):
         {
             "query_name": cfg.query.name,
             "model_name": cfg.model.name,
-            "data_name": cfg.data.name,
+            "data_name": data_name,
             "active_name": active_name,
             "seed": cfg.trainer.seed,
             "num_labelled": cfg.active.num_labelled,
@@ -217,9 +247,9 @@ def init_wandb(cfg: DictConfig):
 
     wandb_run = wandb.init(
         project=cfg.trainer.wandb_project,
-        name=make_run_name(cfg),
-        group=make_group(cfg, active_name),
-        tags=make_tags(cfg, active_name, session_tag),
+        name=make_run_name(cfg, data_name),
+        group=make_group(cfg, active_name, data_name),
+        tags=make_tags(cfg, active_name, session_tag, data_name),
         notes=notes,
         config=config,
     )
