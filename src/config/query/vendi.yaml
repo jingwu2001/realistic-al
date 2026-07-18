@@ -3,6 +3,17 @@ vendi:
   batch_size: 64
   normalization: minmax
   q: 1.0
+  # rbf bandwidth (exp(-gamma ||x-y||^2)): float, "median" (1/(2 median^2)
+  # of pairwise distances), or "dim" (1/(2 D)); ignored by other kernels
   gamma: 1.0
   kernel: rbf
   approx: false
+  # --- embedding source ---
+  # false: penultimate features (get_features); true: BADGE-style last-layer
+  # gradients (query=gvendi sets this; bandit inherits this block, so
+  # ++query.vendi.use_grad=true gives the bandit's diversity arm gradients too)
+  use_grad: false
+  # "linear": flattened C*Z gradient (p - e_y) h^T; "bias": C-dim error vector (p - e_y)
+  grad_embedding_type: linear
+  # labeled set uses ground-truth labels; the pool always uses argmax pseudo-labels
+  labeled_true_labels: true

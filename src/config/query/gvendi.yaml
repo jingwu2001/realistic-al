@@ -1,0 +1,10 @@
+defaults:
+  - /query/vendi@_here_
+
+# gvendi = vendi on BADGE-style last-layer gradient embeddings.
+# Pure config alias: same vendi block (kernel/normalization/gamma/... options
+# identical), only the embedding source flips. Override gradient options via
+# ++query.vendi.grad_embedding_type / ++query.vendi.labeled_true_labels.
+name: gvendi
+vendi:
+  use_grad: true

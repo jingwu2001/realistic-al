@@ -18,7 +18,7 @@ from models.bayesian_module import BayesianModule
 from utils.timer import Timer
 
 
-NAMES = ["kcentergreedy", "badge", "vendi"]
+NAMES = ["kcentergreedy", "badge", "vendi", "gvendi"]
 
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -58,7 +58,9 @@ def query_sampler(
         )
         # there is no ranking, therefore we add descending numerics as ranking values
         return indices, np.arange(acq_size)[::-1]
-    elif name == "vendi":
+    elif name in ("vendi", "gvendi"):
+        # gvendi is a config alias: same implementation with
+        # cfg.query.vendi.use_grad=true (gradient embeddings)
         indices, scores, extra_info = _get_vendi(
             cfg, model, labeled_dataloader, unlabeled_dataloader, acq_size=acq_size
         )
@@ -154,17 +156,28 @@ def get_grad_embedding(
     dataloader: DataLoader,
     grad_embedding_type: str = "linear",
     device: str = "cuda:0",
+    use_true_labels: bool = False,
 ) -> torch.Tensor:
     """Compute gradient embedding of final layer of model for each input in dataloader.
+
+    The per-sample gradient of the cross-entropy loss w.r.t. the last linear layer
+    factorizes as g_x = (p_x - e_{y_x}) h_x^T, where p_x is the softmax output,
+    e_{y_x} the one-hot label and h_x the penultimate features. "bias" returns only
+    the error vector (p_x - e_{y_x}) (C-dim), "linear" the flattened outer product
+    (C*Z-dim), anything else the concatenation of both.
 
     Args:
         model (torch.nn.Module): requires get_features and classifer
         dataloader (DataLoader): contains data.
         grad_embedding_type (str, optional): in [bias, linear,...]. Defaults to "linear".
         device (str, optional): device for gradient computation. Defaults to "cuda:0".
+        use_true_labels (bool, optional): if True, y_x is the ground-truth label from
+            the dataloader (only meaningful for labeled data); if False, y_x is the
+            argmax pseudo-label of the model prediction (BADGE convention, required
+            for the unlabeled pool). Defaults to False.
 
     Returns:
-        torch.Tensor: Embedding of last layer gradient
+        torch.Tensor: Embedding of last layer gradient, shape (N, emb_dim), on CPU.
     """
 
     BayesianModule.k = 1
@@ -186,9 +199,14 @@ def get_grad_embedding(
         embDim = l1.shape[-1]
         outputs = model.model.classifier(features)
 
-        preds = torch.argmax(outputs, dim=1)
+        if use_true_labels:
+            # ground-truth labels (labeled set)
+            targets = y.to(device).long()
+        else:
+            # hard argmax pseudo-labels (unlabeled pool, BADGE convention)
+            targets = torch.argmax(outputs, dim=1)
 
-        loss = F.cross_entropy(outputs, preds, reduction="sum")
+        loss = F.cross_entropy(outputs, targets, reduction="sum")
         l0_grads = torch.autograd.grad(loss, outputs)[0]  # B x C
 
         # Calculate the linear layer gradients as well if needed
@@ -207,9 +225,12 @@ def get_grad_embedding(
             gradient_embeddings = torch.empty(
                 [len(dataloader.dataset), gradient_embedding.shape[1]], device="cpu"
             )
+        # detach: l1 may carry an autograd graph through the classifier weights
+        # (non-small-head models); storing it detached keeps the result a plain
+        # tensor so downstream .numpy()/kernel ops don't drag the graph along.
         gradient_embeddings[
             start_index : start_index + gradient_embedding.shape[0]
-        ] = gradient_embedding.to("cpu")
+        ] = gradient_embedding.detach().to("cpu")
         start_index += gradient_embedding.shape[0]
         torch.cuda.empty_cache()
     return gradient_embeddings
@@ -269,7 +290,56 @@ def _get_kcg(
         acq_indices -= indices_labeled.shape[0]
     return acq_indices
 
-@torch.no_grad()
+def get_vendi_embeddings(vendi_cfg, model, labeled_dataloader, pool_loader):
+    """Embed labeled + pool data for the Vendi machinery.
+
+    Embedding source is selected by ``vendi_cfg.use_grad``:
+      - False: penultimate features h_x via get_features (classic vendi).
+      - True: BADGE-style last-layer gradients g_x = (p_x - e_{y_x}) h_x^T
+        (gvendi). The labeled set uses ground-truth labels (config
+        ``labeled_true_labels``); the pool always uses argmax pseudo-labels.
+
+    Shared by _get_vendi and the bandit's diversity arm, so
+    ++query.vendi.use_grad=true switches both to gradient embeddings.
+
+    Returns:
+        (emb_labeled, emb_unlabeled, grad_norms) — un-normalized embeddings on
+        DEVICE. grad_norms is None unless use_grad: Frobenius norms of the RAW
+        pool gradients, taken BEFORE any normalization (under l2 they would
+        degenerate to constant 1). For the "linear" embedding
+        ||g_x||_F = ||p_x - e_y|| * ||h_x||: a margin-style uncertainty scaled
+        by feature magnitude — the quality signal s(x) for the q-Vendi work.
+    """
+    assert hasattr(model, "get_features")  # model requires function get_features
+
+    if vendi_cfg.get("use_grad", False):
+        # "bias" -> C-dim error vector (p - e_y); "linear" -> flattened C*Z gradient
+        grad_type = vendi_cfg.get("grad_embedding_type", "linear")
+        emb_labeled = get_grad_embedding(
+            model,
+            labeled_dataloader,
+            grad_embedding_type=grad_type,
+            device=DEVICE,
+            use_true_labels=vendi_cfg.get("labeled_true_labels", True),
+        )
+        emb_unlabeled = get_grad_embedding(
+            model, pool_loader, grad_embedding_type=grad_type, device=DEVICE
+        )
+        grad_norms = torch.linalg.vector_norm(emb_unlabeled, dim=1).numpy()
+
+        # get_grad_embedding assembles on CPU (autograd memory); move to the
+        # compute device for the kernel/eigenvalue math. Size is (N, C*Z) —
+        # bounded in practice by the pool subsampling parameter cfg.active.m.
+        emb_labeled = emb_labeled.to(DEVICE)
+        emb_unlabeled = emb_unlabeled.to(DEVICE)
+    else:
+        emb_labeled = get_embeddings(model, labeled_dataloader, cpu=False, numpy=False)
+        emb_unlabeled = get_embeddings(model, pool_loader, cpu=False, numpy=False)
+        grad_norms = None
+
+    return emb_labeled, emb_unlabeled, grad_norms
+
+
 def _get_vendi(
     cfg,
     model: torch.nn.Module,
@@ -277,19 +347,36 @@ def _get_vendi(
     pool_loader: DataLoader,
     acq_size: int = 128,
 ):
-    assert hasattr(model, "get_features")  # model requires function get_features
+    """Vendi-score acquisition on feature embeddings, or on BADGE-style
+    last-layer gradient embeddings when cfg.query.vendi.use_grad is true
+    (the query name ``gvendi`` selects that via its config alias).
 
-    normalization = cfg.query.vendi.normalization
+    NOTE: no @torch.no_grad() decorator — the gradient path needs autograd for
+    the classifier gradients; both embedding helpers return detached tensors
+    and the feature path is no_grad internally.
 
-    feat_labeled = get_embeddings(model, labeled_dataloader, cpu=False, numpy=False)
-    feat_unlabeled = get_embeddings(model,pool_loader, cpu=False, numpy=False)
+    Returns:
+        acq_indices: (acq_size,) pool indices sorted by descending score
+        scores: (acq_size,) Vendi scores of the acquired samples
+        extra_info: score stats + eig timing (+ raw gradient norms if use_grad)
+    """
+    vendi_cfg = cfg.query.vendi
 
-    feat_labeled, feat_unlabeled = normalize_features(feat_labeled, feat_unlabeled, normalization)
-    # feat_labeled: (num_labeled, feature_dim)
-    # feat_unlabeled: (num_unlabeled, feature_dim)
+    emb_labeled, emb_unlabeled, grad_norms = get_vendi_embeddings(
+        vendi_cfg, model, labeled_dataloader, pool_loader
+    )
 
-    scores, eig_time = vendi_from_features(cfg, feat_labeled, feat_unlabeled)
+    emb_labeled, emb_unlabeled = normalize_features(
+        emb_labeled, emb_unlabeled, vendi_cfg.normalization
+    )
+    # emb_labeled: (num_labeled, emb_dim)
+    # emb_unlabeled: (num_unlabeled, emb_dim)
+
+    scores, eig_time = vendi_from_features(vendi_cfg, emb_labeled, emb_unlabeled)
     # scores: (num_unlabeled,)
+
+    del emb_labeled, emb_unlabeled
+    torch.cuda.empty_cache()
 
     # Sort scores descending
     sorted_indices = np.argsort(scores)[::-1]
@@ -298,6 +385,16 @@ def _get_vendi(
 
     extra_info_dict = calculate_extra_info(acq_size, sorted_scores)
     extra_info_dict["eig_time_s"] = round(eig_time, 4)
+
+    if grad_norms is not None:
+        # Raw-gradient-norm diagnostics in the same [max, min, median] acq/else
+        # format as the scores: reorder norms by the score ranking so the first
+        # acq_size entries are exactly the acquired samples.
+        norm_stats = calculate_extra_info(acq_size, grad_norms[sorted_indices])
+        extra_info_dict["grad_norm_acq"] = norm_stats["acq"]
+        extra_info_dict["grad_norm_else"] = norm_stats["else"]
+        # per-sample raw gradient norms of the acquired batch (acquisition order)
+        extra_info_dict["grad_norms_acquired"] = grad_norms[acq_indices]
 
     return acq_indices, sorted_scores[:acq_size], extra_info_dict
 
@@ -430,10 +527,41 @@ def get_embeddings(model, loader, cpu=False, numpy=False):
         features = features.cpu()
     return features
 
-def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
+def resolve_gamma(gamma: Union[float, str], feats: torch.Tensor) -> float:
+    """Resolve the rbf bandwidth setting to a concrete float.
+
+    rbf_kernel computes exp(-gamma * ||x - y||^2), i.e. gamma = 1/(2 sigma^2).
+
+    Accepted settings:
+      - float: used as-is.
+      - "median": median heuristic — sigma = median pairwise distance of
+        feats, gamma = 1/(2 median^2). (Fixes the earlier inverted version
+        that used the median distance itself as gamma — roadmap P3.1.)
+      - "dim": dimension heuristic — gamma = 1/(2 D). Matches the scale of
+        z-scored features, where E||x - y||^2 ~= 2 D.
+
+    Heuristics must be computed on the embeddings the kernel actually sees,
+    i.e. after normalization.
+    """
+    if isinstance(gamma, (int, float)):
+        return float(gamma)
+    if gamma == "median":
+        dists = torch.cdist(feats, feats)
+        med = dists[
+            torch.triu(torch.ones_like(dists, dtype=torch.bool), diagonal=1)
+        ].median().item()
+        # guard against degenerate embeddings (all identical -> med == 0)
+        return 1.0 / max(2.0 * med * med, 1e-12)
+    if gamma == "dim":
+        return 1.0 / (2.0 * feats.shape[1])
+    raise ValueError(f"Unsupported gamma: {gamma}")
+
+
+def vendi_from_features(vendi_cfg, feat_labeled, feat_unlabeled):
     """
     Args:
-        cfg: config
+        vendi_cfg: the cfg.query.vendi sub-config carrying the kernel/Vendi
+            settings; needs keys q, batch_size, gamma, kernel, approx.
         feat_labeled: (num_labeled, feature_dim)
         feat_unlabeled: (num_unlabeled, feature_dim)
     Returns:
@@ -443,20 +571,19 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
         K_LL: (L, L)
         K_UL: (U, L)
         K: (batch_size, L + 1, L + 1)
-        
+
         In each iteration the algorithm takes batch_size samples from K_UL and paste it into off-diagonal blocks,
         and diagonalize the matrices
     """
-    vendi_cfg = cfg.query.vendi
     q = vendi_cfg.q
     batch_size = vendi_cfg.batch_size if vendi_cfg.batch_size is not None else 200
-    if isinstance(vendi_cfg.gamma, float):
-        gamma = vendi_cfg.gamma
-    elif vendi_cfg.gamma == 'median':
-        dists = torch.cdist(feat_labeled, feat_labeled)
-        gamma = dists[torch.triu(torch.ones_like(dists, dtype=torch.bool), diagonal=1)].median().item()
-    else:
-        raise ValueError(f"Unsupported str gamma: {gamma}")
+    # gamma only matters for rbf; skip resolution otherwise (a string
+    # heuristic would trigger a pointless pairwise-distance computation)
+    gamma = (
+        resolve_gamma(vendi_cfg.gamma, feat_labeled)
+        if vendi_cfg.kernel == "rbf"
+        else None
+    )
 
     L = feat_labeled.shape[0]
     U = feat_unlabeled.shape[0]
@@ -467,9 +594,14 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
     K_UL = compute_kernel_matrix(vendi_cfg.kernel, gamma, feat_unlabeled, feat_labeled)
     K_UL = torch.as_tensor(K_UL, dtype=torch.float64, device=DEVICE)
 
+    # Self-similarity k(u, u) of every pool candidate — the bottom-right diagonal
+    # entry of the augmented kernel matrix. Constant 1 for unit-diagonal kernels
+    # (rbf/cosine) but sample-dependent (||u||^2) for the linear kernel.
+    diag_U = kernel_self_similarity(vendi_cfg.kernel, feat_unlabeled)
+    diag_U = torch.as_tensor(diag_U, dtype=torch.float64, device=DEVICE)
+
     K = torch.empty(batch_size, L + 1, L + 1, device=DEVICE, dtype=torch.float64)
     K[:, :L, :L] = K_LL
-    K[:, L, L] = 1.0
     scores = torch.empty(U, device=DEVICE, dtype=torch.float64)
 
     n_eig = int((L + 1) / 3) if vendi_cfg.approx else L + 1
@@ -484,6 +616,7 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
 
         K_batch[:, L, :L] = K_UL_batch
         K_batch[:, :L, L] = K_UL_batch
+        K_batch[:, L, L] = diag_U[batch_size * i: batch_size * (i + 1)]
 
         with Timer() as _t:
             if vendi_cfg.approx:
@@ -493,7 +626,13 @@ def vendi_from_features(cfg, feat_labeled, feat_unlabeled):
                 ev_sum = ev.sum(dim=1, keepdim=True)
                 ev = ev / ev_sum.clamp(min=1e-12)
             else:
-                ev = torch.linalg.eigvalsh(K_batch).clamp(min=0) / (L + 1)
+                # Normalize eigenvalues by the trace (= eigenvalue sum) so they
+                # form a probability distribution. For unit-diagonal kernels
+                # (rbf/cosine) the trace is exactly L + 1 (previous behavior);
+                # for the linear kernel the diagonal is not 1, so dividing by
+                # L + 1 would be wrong.
+                ev = torch.linalg.eigvalsh(K_batch).clamp(min=0)
+                ev = ev / ev.sum(dim=1, keepdim=True).clamp(min=1e-12)
         eig_time += _t.elapsed
 
         eig_vals[batch_size * i: batch_size * (i + 1)] = ev
@@ -531,6 +670,30 @@ def compute_kernel_matrix(
         return rbf_kernel(x, y, gamma=gamma)
     elif kernel == 'cosine':
         return cosine_similarity(x, y)
+    elif kernel == 'linear':
+        # plain inner products; diagonal is ||x||^2, NOT 1 — the Vendi code
+        # accounts for this via kernel_self_similarity + trace normalization
+        return x @ y.T
+    else:
+        raise ValueError(f"Unknown kernel: {kernel}")
+
+
+def kernel_self_similarity(kernel: str, x: torch.Tensor) -> torch.Tensor:
+    """Per-sample self-similarity k(x, x) — the kernel-matrix diagonal — without
+    materializing the full N x N kernel matrix.
+
+    Args:
+        kernel: kernel name as in compute_kernel_matrix
+        x: (N, D)
+
+    Returns:
+        torch.Tensor: (N,) diagonal values
+    """
+    if kernel in ('rbf', 'cosine'):
+        # unit diagonal by construction: exp(0) = 1 resp. cos(x, x) = 1
+        return torch.ones(x.shape[0], dtype=x.dtype, device=x.device)
+    elif kernel == 'linear':
+        return (x * x).sum(dim=1)
     else:
         raise ValueError(f"Unknown kernel: {kernel}")
 
@@ -554,9 +717,10 @@ if __name__ == '__main__':
                 "gamma": 1.0,
                 "q": 1.0,
                 "batch_size": 200,
-                "kernel": "rbf"
+                "kernel": "rbf",
+                "approx": False,
             }
         }
     })
-    scores = vendi_from_features(cfg, x, y)
+    scores = vendi_from_features(cfg.query.vendi, x, y)
     print(scores)

@@ -136,17 +136,18 @@ class TestBanditQuerySampler:
         fake_embeddings_pool    = torch.randn(NUM_POOL,    FEATURE_DIM)
         fake_embeddings_labeled = torch.randn(NUM_LABELED, FEATURE_DIM)
 
-        def fake_get_embeddings(model, loader, cpu, numpy):
-            n = len(loader.dataset)
-            return fake_embeddings_pool if n == NUM_POOL else fake_embeddings_labeled
+        def fake_get_vendi_embeddings(vendi_cfg, model, labeled_loader, pool_loader):
+            # real helper returns (emb_labeled, emb_unlabeled, grad_norms)
+            return fake_embeddings_labeled, fake_embeddings_pool, None
 
         def fake_normalize(feat_labeled, feat_unlabeled, normalization):
             return feat_labeled, feat_unlabeled
 
-        def fake_vendi_from_features(cfg, feat_labeled, feat_unlabeled):
-            return np.random.rand(feat_unlabeled.shape[0]).astype(np.float32)
+        def fake_vendi_from_features(vendi_cfg, feat_labeled, feat_unlabeled):
+            # real function returns (scores, eig_time)
+            return np.random.rand(feat_unlabeled.shape[0]).astype(np.float32), 0.0
 
-        def fake_calculate_vendi(cfg, feats):
+        def fake_calculate_vendi(cfg, gamma, feats):
             return float(np.random.rand())
 
         with mock.patch("query.query_bandit.query_uncertainty") as mock_unc, \
@@ -156,7 +157,7 @@ class TestBanditQuerySampler:
             mock_unc._get_bald_fct.return_value = lambda x: x
             mock_unc.query_sampler.side_effect   = fake_query_sampler
 
-            mock_div.get_embeddings.side_effect       = fake_get_embeddings
+            mock_div.get_vendi_embeddings.side_effect = fake_get_vendi_embeddings
             mock_div.normalize_features.side_effect   = fake_normalize
             mock_div.vendi_from_features.side_effect  = fake_vendi_from_features
 

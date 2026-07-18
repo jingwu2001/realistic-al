@@ -9,7 +9,6 @@ from .query import QuerySampler
 from .bandit import BanditManager
 from . import query_uncertainty
 from . import query_diversity
-from .query_diversity import rbf_kernel, cosine_similarity
 from models.bayesian_module import ConsistentMCDropout
 
 
@@ -129,13 +128,16 @@ class BanditQuerySampler(QuerySampler):
         set_dropout_p(model, 0.0)
 
         normalization = cfg.query.vendi.normalization
-        feat_labeled   = query_diversity.get_embeddings(model, labeled_loader, cpu=False, numpy=False)
-        feat_unlabeled = query_diversity.get_embeddings(model, pool_loader,   cpu=False, numpy=False)
+        # features by default; BADGE-style last-layer gradients when
+        # cfg.query.vendi.use_grad is true (same switch as vendi/gvendi)
+        feat_labeled, feat_unlabeled, _ = query_diversity.get_vendi_embeddings(
+            cfg.query.vendi, model, labeled_loader, pool_loader
+        )
         feat_labeled, feat_unlabeled = query_diversity.normalize_features(
             feat_labeled, feat_unlabeled, normalization
         )
 
-        vendi_scores_pool, _ = query_diversity.vendi_from_features(cfg, feat_labeled, feat_unlabeled)
+        vendi_scores_pool, _ = query_diversity.vendi_from_features(cfg.query.vendi, feat_labeled, feat_unlabeled)
 
         # Q_d  — top-k by Vendi (diversity arm)
         sorted_vendi      = np.argsort(vendi_scores_pool)[::-1].copy()
@@ -147,12 +149,11 @@ class BanditQuerySampler(QuerySampler):
         feat_Q_d   = feat_unlabeled[acq_indices_vendi]
 
         
-        if cfg.query.vendi.gamma == 'median':
-            dists = torch.cdist(feat_labeled, feat_labeled)
-            gamma = dists[torch.triu(torch.ones_like(dists, dtype=torch.bool), diagonal=1)].median().item()
-            print("Using median as gamma")
-        else:
-            gamma = cfg.query.vendi.gamma
+        # resolve the rbf bandwidth on the same (normalized) embeddings the
+        # kernel sees; shared float/"median"/"dim" heuristics with vendi
+        gamma = None
+        if cfg.query.vendi.kernel == "rbf":
+            gamma = query_diversity.resolve_gamma(cfg.query.vendi.gamma, feat_labeled)
 
         vendi_L       = calculate_vendi_score(cfg, gamma, feat_labeled)
         vendi_Q_u_L   = calculate_vendi_score(cfg, gamma, torch.cat([feat_Q_u, feat_labeled], dim=0))
@@ -222,20 +223,13 @@ def calculate_vendi_score(cfg, gamma, feats):
     vendi_cfg = cfg.query.vendi
     q, kernel = vendi_cfg.q, vendi_cfg.kernel
 
-    # Kernel matrix
-    if kernel == 'rbf':
-        K = rbf_kernel(feats, gamma=gamma)
-    elif kernel == 'cosine':
-        K = cosine_similarity(feats)
-    else:
-        raise ValueError(f"Unknown kernel: {kernel}")
-    
+    # Kernel matrix — shared implementations (rbf/cosine/linear)
+    K = query_diversity.compute_kernel_matrix(kernel, gamma, feats, feats)
     K = torch.as_tensor(K, dtype=torch.float64)
-    # Normalize by N
-    N = K.shape[0]
-    K = K / N
-    # Eigenvalues
-    ev = torch.linalg.eigvalsh(K)
+    # Eigenvalues, normalized by the trace: identical to the previous /N for
+    # unit-diagonal kernels (rbf/cosine), required for linear (diagonal != 1)
+    ev = torch.linalg.eigvalsh(K).clamp(min=0)
+    ev = ev / ev.sum().clamp(min=1e-12)
     # Entropy
     entropy = query_diversity.renyi_entropy(ev.unsqueeze(0), q).item()
     return np.exp(entropy)
@@ -310,19 +304,18 @@ if __name__ == "__main__":
         mock_unc.query_sampler.return_value = (np.random.rand(20), None)
         mock_unc._get_bald_fct.return_value = lambda x: x
 
-        # Mock get_embeddings for Vendi
-        mock_div.get_embeddings.return_value = torch.randn(20, 10)
+        # Mock the embedding helper for Vendi: (emb_labeled, emb_unlabeled, grad_norms)
+        mock_div.get_vendi_embeddings.return_value = (torch.randn(20, 10), torch.randn(20, 10), None)
         
         # Mock normalize_features
         mock_div.normalize_features.return_value = (torch.randn(20, 10), torch.randn(20, 10))
 
-        # Mock vendi_from_features return scores
-        mock_div.vendi_from_features.return_value = np.random.rand(20)
+        # Mock vendi_from_features return (scores, eig_time)
+        mock_div.vendi_from_features.return_value = (np.random.rand(20), 0.0)
         
-        # Mock rbf_kernel and renyi_entropy for calculate_vendi_score (called inside ranking_step -> calculate_vendi_score)
-        # Actually calculate_vendi_score calls query_diversity.rbf_kernel and renyi_entropy which are imported attributes in query_bandit
-        # So mocking mock_div.rbf_kernel works if calculate_vendi_score uses query_diversity.rbf_kernel
-        mock_div.rbf_kernel.return_value = torch.randn(5, 5)
+        # Mock the kernel matrix and renyi_entropy for calculate_vendi_score
+        # (calculate_vendi_score uses query_diversity.compute_kernel_matrix)
+        mock_div.compute_kernel_matrix.return_value = torch.randn(5, 5)
         mock_div.renyi_entropy.return_value = torch.tensor(1.0)
 
         print("--- Testing BanditQuerySampler.ranking_step ---")
