@@ -1,457 +1,129 @@
-# Launcher and Datamodule Handoff
+# Handoff — Context for Future Conversations
 
-## Launcher Execution
+Start here, then see **[docs/README.md](README.md)** for the full docs index,
+**[agent_playbook.md](agent_playbook.md)** for how to run/verify anything, and
+**[roadmap.md](roadmap.md)** for the prioritized work plan.
 
-The launcher files in `launchers/` do not train models directly. They build Hydra command-line arguments and then run the actual experiment script as a subprocess.
+## Project
 
-For both examples:
+Jing is developing an active learning (AL) method called **vendi**
+(Vendi-score-based diversity acquisition) and is building a more sophisticated
+version of it (gradient kernels + quality weighting — see
+[gradient_implementation_plan.md](gradient_implementation_plan.md)). The code is
+a fork of the "realistic-al" benchmark framework (PyTorch Lightning + Hydra).
 
-- `launchers/exp_cifar10imb_basic.py`
-- `launchers/exp_p12_transformer.py`
+Two experimental tracks:
 
-the experiment script is:
+1. **CIFAR-10** (balanced `cifar10` + long-tail `cifar10_imb`) — the original
+   focus; kernel/gamma tuning launchers exist (`exp_cifar10*_tune_kernel.py`).
+2. **P12 (PhysioNet 2012 ICU mortality, time-series, ~14% positive)** — the
+   current focus per recent commits: `TimeSeriesDM`, transformer/GRU-D models,
+   and launchers comparing imbalance-handling strategies (weighted loss vs
+   balanced sampling, natural vs long-tailed pool). Running these is roadmap P1.
+3. **MIMIC-III (in-hospital mortality, time-series, ~11.5% positive, N=44812)**
+   — added 2026-07-13 with the **SAND** model (Song et al., AAAI 2018), both
+   ported from Jing's STraTS fork at `~/Desktop/STraTS`. Data:
+   `data/preprocess_mimic3_sand.py` converts STraTS's `mimic_iii.pkl` →
+   `$DATA_ROOT/mimic3_sand/` (dense hourly (24, 387) = 129 vars × values/mask/
+   delta + Age/Gender static; full-data normalisation stats, P12 convention).
+   Run: `data=mimic3_sand` (or `mimic3_sand_baleval`) `model=sand`
+   `active=mimic3_med[_bal]|mimic3_low`. Model lives in
+   `models/networks/bayesian_sand.py` (backbone deterministic, MC-dropout
+   head only; STraTS's always-on attention dropout bug fixed in the port).
 
-```bash
-src/main.py
-```
+A full architecture walkthrough lives in **[codebase_guide.md](codebase_guide.md)**;
+below is the minimal map.
 
-The path comes from:
+## Repo map (src/)
 
-```python
-path_to_ex_file = "src/main.py"
-```
+- `main.py` — AL entry point (Hydra, `config/config.yaml` defaults). Runs `active_loop`: for each of `num_iter` iterations → train fresh model → query pool → label → log to wandb (`al/*` metrics) + `stored.npz`/`test_metrics.csv`/`timing.csv`.
+- `run_training.py` — plain training entry; also hosts `get_torchvision_dm()` (datamodule factory; despite the name it also builds `TimeSeriesDM` for ecg5000/p12) and `label_active_dm()` (initial label seeding).
+- `trainer.py::ActiveTrainingLoop` — one AL iteration: builds `BayesianModule`, pl.Trainer, fits, reloads best-val checkpoint (monitor: `val/auroc` for p12/isic2016, `val/w_acc` for miotcd/ecg5000/isic2019, else `val/acc`), `.active_callback()` runs the `QuerySampler`.
+- Data layer: `data/active.py::ActiveLearningDataset` (boolean labelled mask; `.pool`/`.labelled_set` use test transforms; `label()` takes **pool-relative** indices) ← wrapped by `data/data.py::TorchVisionDM` (images) or `data/timeseriesdata.py::TimeSeriesDM` (ecg5000/p12/p12_transformer, stratified 3-way split, optional `balanced_test_val`) ← both extend `data/base_datamodule.py::BaseDataModule` (train/val split, `min_train` oversampling, `pool_dataloader`/`labeled_dataloader`, `get_pool_indices`, optional `balanced_sampling`).
+- Model layer: `models/abstract_classifier.py::AbstractClassifier` (pl.LightningModule; MC-dropout forward `k` samples, `get_features` → penultimate N×D features used by all diversity queries, optional `weighted_loss`) → `models/bayesian.py::BayesianModule` → networks in `models/networks/` (registry keyed on **filename**; CIFAR: `bayesian_resnet`; P12: `transformer`/`transformer2` (shared `bayesian_transformer.py`), `gru_d`; only the classifier head is Bayesian via `ConsistentMCDropout`).
+- Query layer: `query/query.py::QuerySampler` dispatches by `cfg.query.name` → `query_uncertainty.py` (bald/entropy/variationratios/batchbald/random) or `query_diversity.py` (kcentergreedy/badge/**vendi**). All query code handles tuple inputs (P12 batches). `query/bandit.py` + `query_bandit.py` = LinUCB bandit with 6-D contexts (`config/query/bandit.yaml`), reward = val-metric gain, handled in `main.py`.
+- `utils/wandb_utils.py` — all wandb wiring: run name `{data}/{method-variant}/seed-{seed}`, method-variant tags encode vendi/bandit hyperparameters (and already anticipate `embedding`/`alpha`/`quality` for the gradient work).
+- FixMatch semi-supervised branch: `main_fixmatch.py`, `trainer_fix.py`, `models/fixmatch.py`, `data/sem_sl.py` (not recently exercised).
 
-At runtime, each launcher does roughly this:
+## Vendi method (current implementation)
 
-1. Adds launcher-only CLI args with `ExperimentLauncher.add_argparse_args(parser)`.
-2. Parses args such as `--debug`, `--bsub`, `--test`, `--num_start`, `--num_end`, and `--notes`.
-3. Applies launcher-level changes with `ExperimentLauncher.modify_params_for_args(...)`.
-4. Constructs an `ExperimentLauncher`.
-5. Calls `launcher.launch_runs()`.
+`query/query_diversity.py::_get_vendi` + `vendi_from_features`:
 
-`ExperimentLauncher.launch_runs()` expands the grid from `config_dict` and `hparam_dict`, applies `joint_iteration`, generates experiment names, and runs commands like:
+1. Embed labelled (L) and pool (U) with `get_features`; normalize (`minmax` default; also l2/zscore/none).
+2. Kernel matrices $K_{LL}$, $K_{UL}$ (RBF with $\gamma$, or cosine).
+3. For each pool point: bordered $(L+1)\times(L+1)$ matrix, batched `eigvalsh` (or LOBPCG top-$(L+1)/3$ if `approx: true` — unreliable, see roadmap P3), eigenvalues normalized, Rényi entropy of order $q$, score $= \exp(H_q)$ (Vendi score).
+4. Acquire top `acq_size` scores; `extra_info` logs score stats + `eig_time_s`, surfaced as `al/query/*` in wandb.
 
-```bash
-python /path/to/repo/src/main.py \
-  model=resnet query=random data=cifar10_imb active=cifar10_low optim=sgd_cosine \
-  ++trainer.seed=12345 ++trainer.max_epochs=200 \
-  ++trainer.experiment_name=cifar10_imb/active-cifar10_low/...
-```
+Config: `config/query/vendi.yaml` (`kernel: rbf`, `gamma: 1.0` or `median`, `q: 1.0`, `normalization: minmax`, `batch_size: 64`, `approx: false`). **Known issues** (median-heuristic gamma inverted, approx-path normalization, missing linear kernel) are documented with fixes in [roadmap.md](roadmap.md) P3.
 
-With `--bsub`, the command prefix changes from `python` to:
+`vendi-approx/` (separate embedded git repo) benchmarks eigenvalue-approximation schemes (secular equation, Nyström, …) to speed this up — roadmap P4.
 
-```bash
-~/run_active.sh python
-```
-
-With `--debug`, the launcher prints commands but does not run them.
-
-## `src/main.py` Entry Point
-
-The subprocess enters `src/main.py` through Hydra:
-
-```python
-@hydra.main(config_path="./config", config_name="config", version_base="1.1")
-def main(cfg: DictConfig):
-```
-
-Hydra combines the base config with launcher-provided selections such as:
-
-```bash
-model=resnet
-query=bald
-data=cifar10_imb
-active=cifar10_low
-optim=sgd_cosine
-```
-
-and override args such as:
+## Typical runs
 
 ```bash
-++trainer.seed=12345
-++model.dropout_p=0.5
-++trainer.max_epochs=200
+source .env && conda activate real-al
+
+# CIFAR-10
+python src/main.py data=cifar10 model=resnet active=cifar10_low query=vendi ++trainer.seed=12345
+# active/cifar10_low: 50 initial balanced labels, acq_size 50, 10 iterations
+# data=cifar10_imb: long-tail (exp, rho=0.02) variant
+
+# P12 transformer
+python src/main.py data=p12_transformer_baleval model=transformer2 active=p12_med_bal \
+  query=vendi optim=adam ++model.dropout_p=0.5 ++trainer.max_epochs=50
+
+# Grids go through launchers (always --debug first):
+python launchers/exp_p12_transformer_baleval_weightedloss.py --debug
 ```
 
-Then `main(cfg)` sets up logging, prints config, seeds randomness, optionally creates a `BanditManager`, optionally starts W&B, and calls:
-
-```python
-active_loop(...)
-```
-
-## Single Experiment Before `ActiveTrainingLoop`
-
-Before an `ActiveTrainingLoop` is constructed, `active_loop()` performs two important data steps:
-
-```python
-datamodule = get_active_dm_from_config(cfg)
-label_active_dm(cfg, num_labelled, balanced, datamodule)
-```
-
-In normal launcher runs, `get_active_dm_from_config` is `get_torchvision_dm()` from `src/run_training.py`.
-
-So the flow is:
-
-```text
-Hydra cfg
-  -> get_torchvision_dm(cfg)
-  -> TorchVisionDM(...)
-  -> BaseDataModule.__init__(...)
-  -> TorchVisionDM._setup_datasets()
-  -> label_active_dm(...)
-  -> ActiveTrainingLoop(...)
-```
-
-By the time `ActiveTrainingLoop` receives the datamodule, the datasets have already been built, split, optionally imbalanced, wrapped for active learning, and initially labeled.
-
-## `BaseDataModule`
-
-`BaseDataModule` lives in `src/data/base_datamodule.py` and inherits from PyTorch Lightning:
-
-```python
-class BaseDataModule(pl.LightningDataModule):
-```
-
-It is the generic datamodule base for this codebase. It does not choose CIFAR, P12, or any concrete dataset class. Instead, it provides shared behavior:
-
-- stores loader settings such as `batch_size`, `num_workers`, `pin_memory`, `shuffle`, `persistent_workers`, and `timeout`
-- stores split settings such as `val_split`, `random_split`, `seed`, and `val_size`
-- stores active-learning settings such as `active`, `min_train`, and `balanced_sampling`
-- implements `_split_dataset()`
-- implements `_get_splits()`
-- implements `get_dataloader()`
-- implements `pool_dataloader()`
-- implements `labeled_dataloader()`
-- implements `get_pool_indices()`
-
-The central assumption is that, for active learning, `self.train_set` may be an `ActiveLearningDataset`. In that case, the training dataloader only sees labeled samples, while `pool_dataloader()` exposes the unlabeled pool.
-
-Conceptually, `BaseDataModule` is the reusable active-learning datamodule infrastructure. It does not know how to instantiate MNIST, CIFAR, ISIC, ECG5000, or P12. It only assumes that a subclass will eventually populate:
-
-```python
-self.train_set
-self.val_set
-self.test_set
-```
-
-Once those attributes exist, `BaseDataModule` knows how to split, sample, and load them.
-
-`_get_splits()` interprets `val_split` in two modes:
-
-- integer: exact number of validation samples
-- float: fraction of the dataset to reserve for validation
-
-`_split_dataset()` uses those split sizes. If `random_split=True`, it calls `torch.utils.data.random_split(...)` with `self.seed`, then converts the resulting subsets into `ActiveSubset`s. This conversion matters because this code frequently needs `.targets` and `.transform`; a plain PyTorch `Subset` hides those attributes behind `.dataset`.
-
-If `val_size` is set, `_split_dataset()` further trims the validation subset in a class-balanced way. It reads labels from `dataset_val.targets`, takes the same number of validation samples per class, and has special handling for `isic2019` and `miotcd`.
-
-`get_dataloader()` is the central loader factory. For training, it has two important active-learning behaviors:
-
-- if the current labeled set is smaller than `min_train`, it oversamples to create enough training iterations per epoch
-- if `balanced_sampling=True`, it builds a `WeightedRandomSampler` from class counts
-
-This is why early active-learning rounds can train even when only a small seed set has been labeled.
-
-For active acquisition, `pool_dataloader()` returns a loader over:
-
-```python
-self.train_set.pool
-```
-
-That only works when `self.train_set` is an `ActiveLearningDataset`. If `m` is provided, `pool_dataloader()` first samples a temporary subset of the pool and stores the sampled indices in `self.indices`. Later, `get_pool_indices()` maps query results from this temporary loader back to indices in the full current pool.
-
-`labeled_dataloader()` returns a loader over:
-
-```python
-self.train_set.labelled_set
-```
-
-This is mainly used by acquisition strategies that need a test-transform view of the labeled samples, for example embedding-distance or CoreSet-style methods.
-
-## `TorchVisionDM`
-
-`TorchVisionDM` lives in `src/data/data.py` and inherits from `BaseDataModule`:
-
-```python
-class TorchVisionDM(BaseDataModule):
-```
-
-The inheritance relationship is:
-
-```text
-pytorch_lightning.LightningDataModule
-  -> BaseDataModule
-    -> TorchVisionDM
-```
-
-Despite the name, `TorchVisionDM` handles more than TorchVision datasets. It selects concrete dataset classes for:
-
-- MNIST
-- CIFAR-10
-- CIFAR-100
-- Fashion-MNIST
-- ISIC2016
-- ISIC2019
-- MIO-TCD
-- ECG5000
-- P12
-- P12 transformer
-
-`TorchVisionDM.__init__()` first calls `BaseDataModule.__init__()` to store the generic settings. It then stores concrete dataset settings such as:
-
-- `data_root`
-- `dataset`
-- `num_classes`
-- `mean`
-- `std`
-- `shape`
-- train/test transforms
-- imbalance settings
-
-Then it chooses `self.dataset_cls` and immediately calls:
-
-```python
-self._setup_datasets()
-```
-
-So dataset construction is eager, not lazy.
-
-The relationship between `data.py` and `base_datamodule.py` is therefore:
-
-```text
-BaseDataModule
-  owns generic split/dataloader/pool behavior
-
-TorchVisionDM
-  chooses the concrete dataset class
-  creates train/val/test datasets
-  optionally wraps train_set in ActiveLearningDataset
-  delegates actual dataloader creation back to BaseDataModule
-```
-
-At the end of `data.py`, the Lightning hooks are thin wrappers:
-
-```python
-def train_dataloader(self):
-    return self.get_dataloader(self.train_set, mode="train")
-
-def val_dataloader(self):
-    return self.get_dataloader(self.val_set, mode="test")
-
-def test_dataloader(self):
-    return self.get_dataloader(self.test_set, mode="test")
-```
-
-Those methods are defined on `TorchVisionDM`, but the real dataloader policy comes from `BaseDataModule.get_dataloader()`.
-
-## What `_setup_datasets()` Builds
-
-`TorchVisionDM._setup_datasets()` creates:
-
-```python
-self.train_set
-self.val_set
-self.test_set
-```
-
-For standard image-style datasets such as CIFAR:
-
-1. Ensure the dataset exists locally, downloading if needed.
-2. Build the train split with training transforms.
-3. Split the original training set into train and validation using `_split_dataset()`.
-4. If `imbalance=True`, apply `create_imbalanced_dataset(...)`.
-5. If `active=True`, wrap the train set in `ActiveLearningDataset`.
-6. Build validation and test sets with test transforms.
-
-For `cifar10_imb`, the config uses:
-
-```yaml
-name: cifar10
-imbalance: True
-val_split: 5000
-```
-
-So the concrete dataset is still CIFAR-10. The train split is split into train and validation, the train side is made long-tailed, then it is wrapped for active learning.
-
-For `p12_transformer`, the path is different:
-
-1. Load all P12 labels.
-2. Create stratified test, validation, and pool indices with `_stratified_3way_split()`.
-3. Build `self.train_set = ActiveSubset(_p12_full, _p12_pool_idx)`.
-4. Wrap train set in `ActiveLearningDataset`.
-5. Build validation and test as `Subset(_p12_full_eval, indices)`.
-
-P12 does not use the normal TorchVision train/test split path.
-
-## `ActiveLearningDataset`
-
-`ActiveLearningDataset` lives in `src/data/active.py`. It wraps a normal dataset and tracks which samples are labeled.
-
-On construction, it stores the underlying dataset:
-
-```python
-self._dataset = dataset
-```
-
-and creates a boolean label mask:
-
-```python
-self.labelled = np.zeros(len(self._dataset), dtype=bool)
-```
-
-Initially, all samples are unlabeled.
-
-Internally, the wrapper keeps two related notions of state:
-
-```python
-self.labelled
-self._state.labelled_ind
-```
-
-`self.labelled` is the full boolean mask over the wrapped dataset. `self._state.labelled_ind` is the cached list of currently labeled underlying indices. Whenever labels change, `init_state()` rebuilds this cache.
-
-Its key behavior is that `__len__()` returns the number of labeled samples:
-
-```python
-return self._state.num_label
-```
-
-and `__getitem__()` indexes only into labeled samples:
-
-```python
-return self._dataset[self._state.labelled_ind[index]]
-```
-
-This means that once `self.train_set` is an `ActiveLearningDataset`, the normal training dataloader trains only on the labeled subset.
-
-It also exposes:
-
-- `pool`: a dataset view of the unlabeled samples
-- `labelled_set`: a dataset view of the labeled samples, usually with test/pool transforms
-- `label(index)`: marks one or more pool-relative samples as labeled
-- `label_randomly(n)`: labels random pool samples
-- `label_balanced(n_per_class, num_classes)`: labels a class-balanced seed set
-- `n_labelled`: number of labeled samples
-- `n_unlabelled`: number of unlabeled samples
-
-Important indexing detail: `label(index)` expects indices relative to the current pool, not absolute indices into the underlying dataset. It converts pool indices back into underlying dataset indices internally.
-
-For example, suppose the wrapped dataset has five samples and samples `0` and `3` are already labeled:
-
-```text
-underlying indices:  0  1  2  3  4
-labelled mask:       T  F  F  T  F
-current pool:           0  1     2
-underlying pool idx:    1  2     4
-```
-
-Calling `label(1)` labels pool index `1`, which corresponds to underlying dataset index `2`. This pool-relative convention is why query code can select from `datamodule.train_set.pool` and pass the selected positions back into `datamodule.train_set.label(...)`.
-
-For non-P12 image datasets, `TorchVisionDM` wraps the active train set like this:
-
-```python
-ActiveLearningDataset(
-    self.train_set,
-    pool_specifics={"transform": self.test_transforms},
-)
-```
-
-That means pool and labeled-set views use test transforms rather than training augmentation. This matters for acquisition methods that score the unlabeled pool or compare pool embeddings to labeled embeddings.
-
-For P12/P12 transformer, the wrapper is simpler:
-
-```python
-ActiveLearningDataset(self.train_set)
-```
-
-because those datasets manage normalization internally and do not expose the same image-style transform attribute.
-
-## Initial Labeling
-
-After `TorchVisionDM` is built, `active_loop()` calls `label_active_dm(...)`.
-
-For imbalanced datasets with `balanced=True`, such as `cifar10_imb`, the function first labels `balanced_per_cls` examples per class, then labels any remaining requested samples randomly:
-
-```python
-label_balance = cfg.data.num_classes * balanced_per_cls
-datamodule.train_set.label_balanced(...)
-label_random = num_labelled - label_balance
-datamodule.train_set.label_randomly(label_random)
-```
-
-For `cifar10_low`, `num_labelled=50`, `num_classes=10`, and `balanced_per_cls=5`, so it labels exactly 5 examples per class.
-
-For `cifar10_med`, `num_labelled=250`, so it labels 50 balanced examples first and 200 random examples after that.
-
-For `p12_med_bal`, the active config has:
-
-```yaml
-num_labelled: 100
-balanced: True
-```
-
-and the data config has:
-
-```yaml
-num_classes: 2
-```
-
-So it labels `100 // 2 = 50` examples per class.
-
-## State Handed To `ActiveTrainingLoop`
-
-Right before:
-
-```python
-training_loop = ActiveTrainingLoop(
-    cfg,
-    count=i,
-    datamodule=datamodule,
-    base_dir=os.getcwd(),
-    ...
-)
-```
-
-the datamodule already contains:
-
-```text
-datamodule.train_set = ActiveLearningDataset(...)
-datamodule.val_set   = validation Dataset/Subset
-datamodule.test_set  = test Dataset/Subset
-```
-
-and `datamodule.train_set.labelled` already has `True` entries for the initial seed set.
-
-Training uses:
-
-```python
-datamodule.train_dataloader()
-```
-
-which delegates to:
-
-```python
-BaseDataModule.get_dataloader(self.train_set, mode="train")
-```
-
-Because `self.train_set.__len__()` returns only the labeled count, training only sees labeled samples.
-
-Acquisition later uses:
-
-```python
-datamodule.pool_dataloader()
-```
-
-which returns a dataloader over:
-
-```python
-self.train_set.pool
-```
-
-That is the unlabeled remainder. After acquisition, selected pool-relative indices are passed to:
-
-```python
-datamodule.train_set.label(active_store.requests)
-```
-
-which grows the labeled set for the next active-learning iteration.
+Needs env vars `DATA_ROOT`/`EXPERIMENT_ROOT` (`source .env`); wandb project
+`realistic-al` (`++trainer.use_wandb=false` to disable; `trainer.dry_run=true`
+for config/data checks). Full command/flag reference: [agent_playbook.md](agent_playbook.md) §1–2.
+
+## Gotchas (verified in code)
+
+- Pool indices shift after every `label()` call — never cache them across iterations.
+- Model retrains from scratch each iteration; best-val checkpoint reloaded before querying.
+- `min_train` oversampling (5500 CIFAR / 100 P12) means "epochs" are constant-size regardless of label count.
+- CIFAR resnet config default `dropout_p: 0` → the k MC samples are identical; uncertainty methods need `dropout_p>0` (P12 configs use 0.5); vendi doesn't care.
+- `cfg.active.num_labelled` is mutated (incremented) during the run.
+- Query scoring uses test transforms (pool_specifics swap) and `model.eval()`; P12 datasets normalize internally and are wrapped without pool_specifics.
+- Old pinned PL API (`pl.Trainer(gpus=…)`) — don't modernize.
+
+## State as of 2026-07-11
+
+- **Working tree is dirty** with ~2 months of uncommitted work: small fixes
+  (label-dist logging on raw test sets, launcher notes escaping, run-name data
+  prefix, `wandb` in requirements), a large `analysis/plot_simple.py` refactor
+  (P12 metrics, kernel/gamma filtering), and cleanup deletions (Raindrop
+  submodule, old docs, notebook, Hydra debris). **Roadmap P0 = commit this.**
+- P12 imbalance-comparison launchers are ready; the runs/analysis are the next
+  experimental step (**roadmap P1**).
+- Gradient-Vendi is implemented as `query=gvendi` (2026-07-13): BADGE-style
+  last-layer gradient embeddings through the shared vendi machinery — all
+  normalizations, kernels rbf/cosine/linear (linear needed a proper kernel
+  diagonal + trace-normalized eigenvalues), raw pre-normalization gradient
+  norms always in `extra_info` (the future qVS quality signal). Tests in
+  `tests/test_gvendi.py`; verified end-to-end on P12 transformer (linear+l2),
+  CIFAR-10 (rbf+minmax), and CIFAR-100 (cosine+zscore, `active.m=10000`).
+  Caveat for sweeps: rbf with `gamma: 1.0` saturates on the high-dim gradient
+  embeddings (CIFAR-10: all scores ≈ L+1, near-tied ranking) — prefer cosine/
+  linear or a much smaller gamma. qVS and the factorized-kernel acceleration
+  remain (**roadmap P2**; plan in gradient_implementation_plan.md).
+  Sweep launchers: `exp_{cifar10,cifar100,p12_transformer}_query_sweep.py`
+  (baselines + vendi/gvendi/bandit × kernel×normalization grid; bandit's
+  `calculate_vendi_score` now supports the linear kernel too).
+  2026-07-16: vendi/gvendi merged — `query.vendi.use_grad` flips the embedding
+  source (gvendi = config alias), and since bandit inherits the vendi block,
+  `query=bandit ++query.vendi.use_grad=true` gives the bandit's diversity arm
+  gradient embeddings. `query.gvendi.*` keys no longer exist.
+  Full change summary: [gvendi_integration.md](gvendi_integration.md).
+- MIMIC-III + SAND task added (2026-07-13, uncommitted): see track 3 above.
+  Verified: dry run + 2-iteration AL smoke runs with `query=random` and
+  `query=vendi`. Preprocessed data sits in `$DATA_ROOT/mimic3_sand/`
+  (regenerable from `~/Desktop/STraTS/data/processed/mimic_iii.pkl`).
+- improve_logging.md is essentially done (`utils/wandb_utils.py`); leftovers are
+  folded into roadmap P2/P5.
+- Tests: `tests/test_vendi.py`, `tests/test_bandit_features.py`,
+  `src/test/test_chunked_pdist.py` — run via
+  `conda run -n real-al python -m pytest tests/ -v`.
