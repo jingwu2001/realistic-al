@@ -1,0 +1,10 @@
+name: mimic3_sand
+shape: [24, 387]
+num_classes: 2
+val_split: 0.1
+mean: [0.0]
+std: [1.0]
+transform_train: basic
+transform_test: basic
+balanced_sampling: false
+balanced_test_val: false

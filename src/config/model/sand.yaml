@@ -1,0 +1,24 @@
+name: sand
+# --- Architecture (defaults follow the STraTS MIMIC-III SAND run) ---
+d_inp: 387         # time-series input dim per timestep = 3V (129 vars x values/obs/delta)
+T: 24              # hourly bins (first 24h of ICU stay)
+d_static: 2        # static features: Age, Gender
+hid_dim: 64        # transformer hidden dimension
+num_heads: 4       # attention heads (must divide hid_dim)
+num_layers: 4      # transformer blocks
+r: 24              # attention band: t attends to t-r..t (24 = full causal)
+M: 12              # dense-interpolation steps -> feature dim hid_dim*M + hid_dim
+# --- Bayesian ---
+dropout_p: 0.2
+k: 10
+# --- Optimiser ---
+weight_decay: 1.0e-5
+learning_rate: 0.0005
+# --- Framework flags ---
+use_ema: False
+exclude_bn_bias: False
+small_head: False
+weighted_loss: False
+load_pretrained: Null
+freeze_encoder: False
+finetune: False

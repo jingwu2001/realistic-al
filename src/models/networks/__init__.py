@@ -8,5 +8,7 @@ from .gru_d import *
 from .bayesian_transformer import BayesianTransformerModel, BayesianTransformerModel2
 from .transformer import *
 from .transformer2 import *
+from .bayesian_sand import BayesianSANDModel
+from .sand import *
 from .build import build_model
 from .registry import *

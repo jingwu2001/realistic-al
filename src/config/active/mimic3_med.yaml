@@ -1,0 +1,7 @@
+num_labelled: 100
+min_train: 100
+balanced: False
+acq_size: 100
+num_iter: 10
+random_split: True
+m: Null
