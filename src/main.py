@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import time
@@ -17,7 +18,12 @@ from query.bandit import BanditManager
 from utils import config_utils
 from utils.timer import Timer
 from utils.log_utils import setup_logger
-from utils.wandb_utils import init_wandb, log_al_iteration, log_label_distributions
+from utils.wandb_utils import (
+    aubc_summary,
+    init_wandb,
+    log_al_iteration,
+    log_label_distributions,
+)
 
 
 @hydra.main(config_path="./config", config_name="config", version_base="1.1")
@@ -75,7 +81,10 @@ def main(cfg: DictConfig):
             wandb_run.finish(exit_code=exit_code)
 
 
-@logger.catch
+# reraise so main()'s try/except sets exit_code=1 and the wandb run is marked
+# failed — with the default swallow, a crash mid-loop leaves the run "finished"
+# with a truncated (or empty) al/ history.
+@logger.catch(reraise=True)
 def active_loop(
     cfg: DictConfig,
     ActiveTrainingLoop=ActiveTrainingLoop,
@@ -266,6 +275,18 @@ def active_loop(
         request_pool=request_pool,
         bandit_arms=bandit_arms,
     )
+
+    # Area under the budget curve (normalized trapezoid of metric vs labeled-set
+    # size) for every test metric — the scalar that summarizes the whole AL
+    # trajectory. Saved locally and as wandb summary keys so runs are sortable
+    # by al_summary/aubc_* in the runs table.
+    aubc = aubc_summary(metrics_df, num_samples)
+    if aubc:
+        with open(os.path.join(store_path, "aubc.json"), "w") as f:
+            json.dump(aubc, f, indent=2)
+        if wandb_run is not None:
+            wandb_run.summary.update(aubc)
+        logger.info("AUBC summary: {}".format(aubc))
 
     for i, store in enumerate(active_stores):
         if store.extra_info is not None:

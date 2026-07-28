@@ -253,7 +253,11 @@ def init_wandb(cfg: DictConfig):
         notes=notes,
         config=config,
     )
-    wandb_run.define_metric("al/*", step_metric="al_iter")
+    # n_labelled is the natural budget axis for AL curves — make it the
+    # default x-axis of every auto-generated al/* panel (al_iter is still
+    # logged alongside for reference / exact-round alignment).
+    wandb_run.define_metric("al/n_labelled")
+    wandb_run.define_metric("al/*", step_metric="al/n_labelled")
     return wandb_run
 
 
@@ -338,6 +342,51 @@ def log_al_iteration(
         log_dict.update(_read_loop_metrics(log_dir))
     log_dict.update(_query_score_metrics(extra_info))
     wandb_run.log(log_dict)
+
+
+def compute_aubc(x, y) -> float:
+    """Area under the budget curve, normalized by the budget span.
+
+    Trapezoidal integral of metric ``y`` against labeled-set size ``x``,
+    divided by ``x[-1] - x[0]`` — i.e. the budget-weighted mean of the
+    metric, living on the same scale as the metric itself. The standard AL
+    summary statistic: it rewards methods that reach good performance
+    *early* in the budget, not just at the final iteration.
+
+    Non-finite pairs are dropped; returns NaN with fewer than 2 valid points.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    x, y = x[mask], y[mask]
+    if len(x) < 2:
+        return float("nan")
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    if x[-1] == x[0]:
+        return float("nan")
+    return float(np.trapz(y, x) / (x[-1] - x[0]))
+
+
+def aubc_summary(metrics_df, num_samples) -> dict:
+    """AUBC for every per-iteration test metric column.
+
+    ``metrics_df``: one row per AL iteration (columns like ``test/acc``,
+    ``test/auroc``, ``test/auprc``); ``num_samples``: labeled-set size at each
+    iteration. Returns ``{"al_summary/aubc_test_acc": ..., ...}`` suitable for
+    ``wandb_run.summary.update``.
+    """
+    out = {}
+    n = min(len(metrics_df), len(num_samples))
+    if n < 2:
+        return out
+    x = np.asarray(num_samples)[:n]
+    for col in metrics_df.columns:
+        y = pd.to_numeric(metrics_df[col], errors="coerce").values[:n]
+        v = compute_aubc(x, y)
+        if np.isfinite(v):
+            out[f"al_summary/aubc_{col.replace('/', '_')}"] = round(v, 6)
+    return out
 
 
 def log_label_distributions(wandb_run, datamodule):
