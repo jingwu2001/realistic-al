@@ -27,7 +27,7 @@ config_dict = {
         # batchbald: heavy but feasible on the binary task (100 greedy steps
         # over the ~30k pool in float64, est. hours per run) — prune the rows
         # with --num_start/--num_end or ++active.m if it proves too slow
-        "batchbald",
+        # "batchbald",
     ],
     "data": [
         "mimic3_sand_baleval",  # balanced 50/50 test+val; pool drained to ~1.9% pos

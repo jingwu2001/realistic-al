@@ -25,12 +25,13 @@ from launcher import ExperimentLauncher
 # aligned (kernel, normalization, gamma) rows, zipped via joint_iteration;
 # gamma is ignored by cosine (placeholder 1.0)
 KERNEL_GRID = (
+    [("cosine", "none", 1.0)]
+    +
     [
         ("rbf", norm, gamma)
         for norm in ("l2", "minmax", "zscore", "none")
         for gamma in ("dim", "median")
     ]
-    + [("cosine", "none", 1.0)]
 )
 kernels = [k for k, _, _ in KERNEL_GRID]
 norms = [n for _, n, _ in KERNEL_GRID]
@@ -53,7 +54,8 @@ config_dict = {
 hparam_dict = {
     "data.balanced_sampling": False,
     "model.weighted_loss": True,
-    "trainer.seed": [12345, 12346, 12347],
+    # "trainer.seed": [12345, 12346, 12347],
+    "trainer.seed": [12345],
     "trainer.max_epochs": 50,
     "model.dropout_p": 0.2,
     "model.learning_rate": [0.0005],
