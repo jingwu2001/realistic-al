@@ -43,8 +43,9 @@ re-splits later). Steps, replicating STraTS's `model_type='sand'` branch:
    then z-normalise each variable over all `(N, T)` cells. Stats come from the
    **full dataset** — see deviation 1 below.
 7. `X = concat([values, obs, delta], axis=-1)` → `(44812, 24, 387)` float32,
-   saved with `demo.npy`, `targets.npy`, and `meta.json` (variable names, dims,
-   channel layout) to `$DATA_ROOT/mimic3_sand/`.
+   saved with `demo.npy`, `targets.npy`, `subject_ids.npy` (per-stay patient id
+   for patient-grouped splitting), and `meta.json` (variable names, dims,
+   channel layout, `n_patients`) to `$DATA_ROOT/mimic3_sand/`.
 
 ### 2. Dataset class (`src/data/mimic_dataset.py`)
 
@@ -53,7 +54,9 @@ serves `((ts, demo), label)` with `ts: (24, 387)` float32, `demo: (2,)`
 float32, `label` int. Normalisation is baked in at preprocess time, so there is
 no transform pipeline (the `transform_train/test: basic` keys in the data
 config are inert for this dataset, as for P12). The `targets` attribute (numpy
-int64) is what the datamodule's stratified splitter and `label_balanced` read.
+int64) is what the datamodule's stratified splitter and `label_balanced` read;
+the `groups` attribute (patient ids from `subject_ids.npy`, or `None` if
+absent) drives the patient-grouped split.
 
 ### 3. Datamodule (`src/data/timeseriesdata.py::TimeSeriesDM`)
 
@@ -61,11 +64,23 @@ int64) is what the datamodule's stratified splitter and `label_balanced` read.
 `mimic3_sand` is in its `time_series_datasets` set; the dataset name comes from
 `cfg.data.name`. Inside `_setup_datasets`:
 
-- **Split** — `_stratified_3way_split`, seeded by `trainer.seed` (a different
-  split every seed): test = 10% of N, val = `val_split` fraction (0.1), both
-  stratified per class; the remainder is the AL pool. With
-  `balanced_test_val: true` (the `_baleval` data config) test and val instead
-  get equal per-class counts: 2,240 + 2,240 per class.
+- **Split** — `_grouped_stratified_3way_split`, seeded by `trainer.seed` (a
+  different split every seed): test = 10% of N, val = `val_split` fraction
+  (0.1), the remainder is the AL pool. Splitting is at the **patient**
+  (`SUBJECT_ID`) level, not the stay level: all ICU stays of a patient land in
+  the same split, so no patient leaks across train/val/test (44,812 stays come
+  from 33,395 patients; 8,324 have >1 stay and 1,312 have mixed mortality
+  labels across stays). This mirrors STraTS's reference split
+  (`preprocess_mimic_iii_large.py`), which groups by `SUBJECT_ID` — but STraTS
+  fixes `np.random.seed(0)` once at preprocess time, whereas here the split is
+  redrawn per `trainer.seed`. The split targets positive/negative *sample*
+  counts (base-rate proportions by default, 50/50 with `balanced_test_val`);
+  positives can only enter via a positive patient (who may drag a few negative
+  stays along), and negatives are topped up from negative-only patients, so
+  realised sizes/ratios are approximate. Verified: test/val hit ~11.5% (natural)
+  or ~50.0% (baleval) positive with zero patient leakage.
+  `MIMIC3SandDataset.groups` (from `subject_ids.npy`) carries the patient ids;
+  P12 has no `groups`, so it still uses the plain `_stratified_3way_split`.
 - **Consequence of balanced eval**: MIMIC has only ~5,150 positives, and the
   balanced eval sets consume 4,480 of them, so the remaining pool of 35,852 is
   ~1.9% positive — far more imbalanced than the natural 11.5%. (Same mechanism
@@ -112,8 +127,8 @@ iterations trains a **fresh** model and queries:
 
 | File | What it is |
 |---|---|
-| `src/data/preprocess_mimic3_sand.py` | One-time converter: STraTS `mimic_iii.pkl` → `$DATA_ROOT/mimic3_sand/{X,demo,targets}.npy` + `meta.json`. Replicates STraTS's SAND pipeline (24h filter, Age>200 fix, hourly binning, delta channel, mean-fill, z-norm). |
-| `src/data/mimic_dataset.py` | `MIMIC3SandDataset` — loads the `.npy` files, exposes `.targets` for stratified splitting (P12 pattern). |
+| `src/data/preprocess_mimic3_sand.py` | One-time converter: STraTS `mimic_iii.pkl` → `$DATA_ROOT/mimic3_sand/{X,demo,targets,subject_ids}.npy` + `meta.json`. Replicates STraTS's SAND pipeline (24h filter, Age>200 fix, hourly binning, delta channel, mean-fill, z-norm) and emits per-stay `SUBJECT_ID` for patient-grouped splitting. |
+| `src/data/mimic_dataset.py` | `MIMIC3SandDataset` — loads the `.npy` files, exposes `.targets` for stratification and `.groups` (patient ids) for patient-grouped splitting (P12 pattern). |
 | `src/models/networks/bayesian_sand.py` | `BayesianSANDModel` + ported SAND blocks (`MultiHeadAttention`, conv `FeedForward`, `TransformerBlock`, `DenseInterpolation`). Deterministic backbone; `ConsistentMCDropout` + linear head only (repo convention). Feature dim = `hid_dim*M + hid_dim` = 832. |
 | `src/models/networks/sand.py` | Registry entry `sand` (filename-keyed, per repo pattern). |
 | `src/config/model/sand.yaml` | Defaults follow the STraTS MIMIC run: hid_dim 64, 4 layers, 4 heads, r 24, M 12, dropout 0.2, lr 5e-4. |

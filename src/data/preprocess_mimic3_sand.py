@@ -20,11 +20,19 @@ FULL dataset instead of a fixed train split, because the AL framework
 (TimeSeriesDM) draws its own stratified train/val/test splits per seed.
 This matches how the P12 datasets in this repo are normalised.
 
+The STraTS train/val/test ids baked into the pickle are *not* reused; they were
+drawn once with a fixed seed. Instead we emit the patient id (SUBJECT_ID) of
+every stay so TimeSeriesDM can draw a *patient-grouped* split per seed — all
+ICU stays of a patient land in the same split, avoiding train/test leakage
+(a patient may have several stays, and STraTS reference splits at the patient
+level; see preprocess_mimic_iii_large.py).
+
 Output (written to <out>/):
-  X.npy        (N, 24, 3V) float32
-  demo.npy     (N, 2)      float32   z-normalised Age, Gender
-  targets.npy  (N,)        int64     in-hospital mortality
-  meta.json    variable names, static names, T, V
+  X.npy            (N, 24, 3V) float32
+  demo.npy         (N, 2)      float32   z-normalised Age, Gender
+  targets.npy      (N,)        int64     in-hospital mortality
+  subject_ids.npy  (N,)        int64     MIMIC-III SUBJECT_ID (patient id)
+  meta.json        variable names, static names, T, V
 
 Usage:
   conda run -n real-al python src/data/preprocess_mimic3_sand.py \
@@ -78,7 +86,11 @@ def main() -> None:
     oc["ts_ind"] = oc["ts_id"].map(ts_id_to_ind)
     oc = oc.sort_values(by="ts_ind")
     y = np.array(oc["in_hospital_mortality"], dtype=np.int64)
-    print(f"N = {N}, positive rate = {y.mean():.4f}")
+    # Patient id per stay (aligned to ts_ind order), used for patient-grouped
+    # train/val/test splitting downstream.
+    subject_ids = np.array(oc["SUBJECT_ID"], dtype=np.int64)
+    n_patients = int(np.unique(subject_ids).size)
+    print(f"N = {N}, positive rate = {y.mean():.4f}, patients = {n_patients}")
 
     # --- 2. static variables -> demo (N, 2) ---
     static_ii = data.variable.isin(STATIC_VARIS)
@@ -135,6 +147,7 @@ def main() -> None:
     np.save(os.path.join(args.out, "X.npy"), X)
     np.save(os.path.join(args.out, "demo.npy"), demo)
     np.save(os.path.join(args.out, "targets.npy"), y)
+    np.save(os.path.join(args.out, "subject_ids.npy"), subject_ids)
     with open(os.path.join(args.out, "meta.json"), "w") as f:
         json.dump(
             {
@@ -142,6 +155,7 @@ def main() -> None:
                 "V": V,
                 "D": D,
                 "N": N,
+                "n_patients": n_patients,
                 "variables": list(map(str, variables)),
                 "static_varis": STATIC_VARIS,
                 "channel_layout": "concat([values, obs_mask, delta], axis=-1)",
@@ -150,7 +164,10 @@ def main() -> None:
             f,
             indent=2,
         )
-    print(f"Saved X {X.shape}, demo {demo.shape}, targets {y.shape} -> {args.out}")
+    print(
+        f"Saved X {X.shape}, demo {demo.shape}, targets {y.shape}, "
+        f"subject_ids {subject_ids.shape} ({n_patients} patients) -> {args.out}"
+    )
 
 
 if __name__ == "__main__":

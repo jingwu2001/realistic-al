@@ -146,6 +146,90 @@ class TimeSeriesDM(BaseDataModule):
             np.concatenate(pool_idx),
         )
 
+    def _grouped_stratified_3way_split(
+        self, labels, groups, n_total, test_size, val_size, balanced_eval: bool = False
+    ):
+        """Patient-grouped variant of :meth:`_stratified_3way_split`.
+
+        Every sample belongs to a group (``groups[i]`` = patient id). All
+        samples of a group are assigned to the *same* split, so a patient with
+        several ICU stays never leaks across train/val/test. Groups are
+        shuffled with ``self.seed``, so different seeds yield different splits.
+
+        Splitting is driven by target positive/negative *sample* counts per
+        split rather than by whole groups, so class balance is preserved as
+        closely as whole-group assignment allows. Positives can only enter a
+        split via a positive patient (who typically also brings a few negative
+        stays); negatives are then topped up from negative-only patients. With
+        ``balanced_eval`` the targets are 50/50; otherwise they follow the
+        dataset's base rate (matching the ungrouped stratified split).
+
+        Because whole patients are assigned atomically, realised sizes and
+        ratios approximate the targets.
+        """
+        labels = np.asarray(labels)
+        groups = np.asarray(groups)
+        rng = np.random.default_rng(self.seed)
+
+        # Build one index array per group (sample indices belonging to it).
+        order = np.argsort(groups, kind="stable")
+        _, start = np.unique(groups[order], return_index=True)
+        member_lists = np.split(order, start[1:])
+        group_label = np.array([int(labels[m].max()) for m in member_lists])
+        # (#positive samples, #negative samples) carried by each group.
+        group_pos = np.array([int(labels[m].sum()) for m in member_lists])
+        group_neg = np.array([len(m) for m in member_lists]) - group_pos
+
+        pos_total = int((labels == 1).sum())
+        neg_total = n_total - pos_total
+
+        def targets(size):
+            if balanced_eval:
+                half = max(1, size // 2)
+                return half, half
+            return (
+                max(1, round(pos_total * size / n_total)),
+                max(1, round(neg_total * size / n_total)),
+            )
+
+        t_pos, t_neg = targets(test_size)
+        v_pos, v_neg = targets(val_size)
+
+        # Shuffle positive-patient and negative-patient groups independently.
+        pos_groups = np.where(group_label == 1)[0]
+        neg_groups = np.where(group_label == 0)[0]
+        rng.shuffle(pos_groups)
+        rng.shuffle(neg_groups)
+        p_ptr = n_ptr = 0
+
+        def fill(need_pos, need_neg):
+            """Consume shuffled groups until pos/neg sample quotas are met."""
+            nonlocal p_ptr, n_ptr
+            sel, got_pos, got_neg = [], 0, 0
+            # positives only come from positive-patient groups
+            while p_ptr < len(pos_groups) and got_pos < need_pos:
+                gi = pos_groups[p_ptr]; p_ptr += 1
+                sel.append(gi); got_pos += group_pos[gi]; got_neg += group_neg[gi]
+            # top up negatives from negative-only patients
+            while n_ptr < len(neg_groups) and got_neg < need_neg:
+                gi = neg_groups[n_ptr]; n_ptr += 1
+                sel.append(gi); got_pos += group_pos[gi]; got_neg += group_neg[gi]
+            return sel
+
+        test_sel = fill(t_pos, t_neg)
+        val_sel = fill(v_pos, v_neg)
+        pool_sel = list(pos_groups[p_ptr:]) + list(neg_groups[n_ptr:])
+        assert pool_sel, (
+            f"no groups left for the pool after filling test/val "
+            f"(test_size={test_size}, val_size={val_size})"
+        )
+
+        def to_idx(sel):
+            return (np.concatenate([member_lists[g] for g in sel])
+                    if sel else np.array([], dtype=int))
+
+        return to_idx(test_sel), to_idx(val_sel), to_idx(pool_sel)
+
     def _setup_datasets(self):
         """Creates the active training dataset and validation and test datasets"""
         # ------------------------------------------------------------------ #
@@ -172,15 +256,28 @@ class TimeSeriesDM(BaseDataModule):
                 _ts_root    = os.path.join(self.data_root, "mimic3_sand")
             else:
                 _ts_root    = os.path.join(self.data_root, "P12data/processed_data")
-            _ts_labels      = self.dataset_cls(root=_ts_root).targets
+            _ts_meta        = self.dataset_cls(root=_ts_root)
+            _ts_labels      = _ts_meta.targets
+            _ts_groups      = getattr(_ts_meta, "groups", None)
             _ts_n_total     = len(_ts_labels)
             _ts_test_size   = max(1, round(0.1 * _ts_n_total))
             _ts_val_size    = (self.val_split if isinstance(self.val_split, int)
                                else max(1, round(self.val_split * _ts_n_total)))
-            _ts_test_idx, _ts_val_idx, _ts_pool_idx = self._stratified_3way_split(
-                _ts_labels, _ts_n_total, _ts_test_size, _ts_val_size,
-                balanced_eval=self.balanced_test_val,
-            )
+            if _ts_groups is not None:
+                # Patient-grouped split (mimic3_sand): keep all of a patient's
+                # ICU stays in the same split to avoid train/test leakage.
+                _ts_test_idx, _ts_val_idx, _ts_pool_idx = (
+                    self._grouped_stratified_3way_split(
+                        _ts_labels, _ts_groups, _ts_n_total,
+                        _ts_test_size, _ts_val_size,
+                        balanced_eval=self.balanced_test_val,
+                    )
+                )
+            else:
+                _ts_test_idx, _ts_val_idx, _ts_pool_idx = self._stratified_3way_split(
+                    _ts_labels, _ts_n_total, _ts_test_size, _ts_val_size,
+                    balanced_eval=self.balanced_test_val,
+                )
 
         # ------------------------------------------------------------------ #
         # Build train (pool) set                                               #
