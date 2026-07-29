@@ -29,14 +29,16 @@ def _robust_eigvalsh(K: torch.Tensor) -> torch.Tensor:
     cuSOLVER's batched ``eigvalsh`` (on CUDA) can fail to converge on
     near-singular / repeated-eigenvalue matrices — e.g. a cosine Gram matrix of
     near-collinear gradient features (``query=gvendi``) when the labelled set is
-    nearly one class. On such a failure, retry on CPU LAPACK (much more robust)
-    with a tiny diagonal jitter. The caller renormalizes eigenvalues by their
-    sum, so the jitter is numerically negligible.
+    nearly one class. On such a failure, retry on CPU LAPACK (more robust) after
+    sanitizing (drop any NaN/Inf, symmetrize) and adding a tiny diagonal jitter.
+    The caller renormalizes eigenvalues by their sum, so the jitter is negligible.
     """
     try:
         return torch.linalg.eigvalsh(K)
     except torch.linalg.LinAlgError:
-        K_cpu = K.detach().to("cpu")
+        # eigvalsh cannot handle NaN/Inf; scrub and symmetrize before retrying.
+        K_cpu = torch.nan_to_num(K.detach().to("cpu"))
+        K_cpu = 0.5 * (K_cpu + K_cpu.transpose(-1, -2))
         n = K_cpu.shape[-1]
         eye = torch.eye(n, dtype=K_cpu.dtype)
         diag_mean = (
@@ -488,7 +490,13 @@ def cosine_similarity(x, y=None):
     """
     if y is None:
         y = x
-    return (x @ y.T) / (torch.norm(x, dim=1, p=2).view(-1, 1) * torch.norm(y, dim=1, p=2).view(1, -1))    
+    # Clamp norms away from zero: a zero-norm feature vector (e.g. a zero
+    # gradient under query=gvendi) would otherwise give 0/0 = NaN, which then
+    # propagates into the kernel matrix and makes every eigensolver fail. A
+    # zero-norm row then has cosine 0 with everything (well-defined).
+    nx = torch.norm(x, dim=1, p=2).clamp_min(1e-12).view(-1, 1)
+    ny = torch.norm(y, dim=1, p=2).clamp_min(1e-12).view(1, -1)
+    return (x @ y.T) / (nx * ny)
 
 
 
