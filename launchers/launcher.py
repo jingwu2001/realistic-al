@@ -286,15 +286,23 @@ class BaseLauncher:
         return False
 
     def launch_runs(self):
-        """Execute all runs specified in init."""
+        """Execute all runs specified in init.
+
+        A single failed run does NOT abort the sweep: its non-zero exit is
+        caught, logged, and the launcher continues with the next run. Any
+        failures are summarized at the end. (Runs became able to exit non-zero
+        once main.py stopped swallowing exceptions — see @logger.catch(reraise).)
+        """
         experiment_root = os.environ.get("EXPERIMENT_ROOT", "experiments")
+        total = len(self.parsed_product)
+        failures = []
         for i, (config_dict, param_dict) in enumerate(self.parsed_product):
             counter = i + 1
             if counter <= self.launcher_args.num_start or (
                 counter > self.launcher_args.num_end and self.launcher_args.num_end > 0
             ):
                 continue
-            print(f"Launch: {counter}/{len(self.parsed_product)}")
+            print(f"Launch: {counter}/{total}")
 
             config_args = self.dict_to_arg(config_dict)
             param_args = self.dict_to_arg(param_dict, prefix="++")
@@ -312,7 +320,11 @@ class BaseLauncher:
             launch_command = f"{self.ex_call} {self.path_to_ex_file} {full_args}"
 
             print(launch_command)
-            if not self.launcher_args.debug:
+            if self.launcher_args.debug:
+                continue
+
+            log_path = None
+            try:
                 if getattr(self.launcher_args, "dry_run", False):
                     subprocess.run(launch_command, shell=True, check=True, env=os.environ)
                 else:
@@ -322,6 +334,19 @@ class BaseLauncher:
                     print(f"Logging to: {log_path}")
                     with open(log_path, "w") as log_file:
                         subprocess.run(launch_command, shell=True, check=True, stdout=log_file, stderr=log_file)
+            except subprocess.CalledProcessError as e:
+                msg = f"[WARNING] run {counter}/{total} failed (exit {e.returncode}); continuing to next run."
+                if log_path is not None:
+                    msg += f" See {log_path}"
+                print(msg)
+                failures.append((counter, experiment_name, log_path))
+
+        if failures:
+            print(f"\n[SUMMARY] {len(failures)}/{total} run(s) FAILED:")
+            for c, name, lp in failures:
+                print(f"  - {c}/{total}: {name}" + (f"  ({lp})" if lp else ""))
+        else:
+            print("\n[SUMMARY] all launched runs completed successfully.")
 
     @staticmethod
     def dict_to_arg(
