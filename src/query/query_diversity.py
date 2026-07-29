@@ -23,6 +23,32 @@ NAMES = ["kcentergreedy", "badge", "vendi", "gvendi"]
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
+def _robust_eigvalsh(K: torch.Tensor) -> torch.Tensor:
+    """Symmetric-eigenvalue solve tolerant of ill-conditioned kernels.
+
+    cuSOLVER's batched ``eigvalsh`` (on CUDA) can fail to converge on
+    near-singular / repeated-eigenvalue matrices — e.g. a cosine Gram matrix of
+    near-collinear gradient features (``query=gvendi``) when the labelled set is
+    nearly one class. On such a failure, retry on CPU LAPACK (much more robust)
+    with a tiny diagonal jitter. The caller renormalizes eigenvalues by their
+    sum, so the jitter is numerically negligible.
+    """
+    try:
+        return torch.linalg.eigvalsh(K)
+    except torch.linalg.LinAlgError:
+        K_cpu = K.detach().to("cpu")
+        n = K_cpu.shape[-1]
+        eye = torch.eye(n, dtype=K_cpu.dtype)
+        diag_mean = (
+            K_cpu.diagonal(dim1=-2, dim2=-1)
+            .mean(dim=-1, keepdim=True)
+            .unsqueeze(-1)
+            .clamp(min=1.0)
+        )
+        K_cpu = K_cpu + 1e-9 * diag_mean * eye
+        return torch.linalg.eigvalsh(K_cpu).to(K.device, K.dtype)
+
+
 def query_sampler(
     cfg: DictConfig,
     model: torch.nn.Module,
@@ -631,7 +657,7 @@ def vendi_from_features(vendi_cfg, feat_labeled, feat_unlabeled):
                 # (rbf/cosine) the trace is exactly L + 1 (previous behavior);
                 # for the linear kernel the diagonal is not 1, so dividing by
                 # L + 1 would be wrong.
-                ev = torch.linalg.eigvalsh(K_batch).clamp(min=0)
+                ev = _robust_eigvalsh(K_batch).clamp(min=0)
                 ev = ev / ev.sum(dim=1, keepdim=True).clamp(min=1e-12)
         eig_time += _t.elapsed
 
