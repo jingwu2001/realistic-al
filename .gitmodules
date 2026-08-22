@@ -1,3 +1,6 @@
 [submodule "vendi-approx"]
 	path = vendi-approx
 	url = git@github.com:jingwu2001/vendi-approx.git
+[submodule "third_party/ecg_ptbxl_benchmarking"]
+	path = third_party/ecg_ptbxl_benchmarking
+	url = https://github.com/helme/ecg_ptbxl_benchmarking.git
