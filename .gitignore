@@ -166,3 +166,8 @@ misc/
 # experiment plot outputs / local pids
 analysis/plots_simple/
 *.pid
+
+# local-only artifacts (not repo material)
+wandb/
+papers/
+20260408_Nano5_slide.pdf
