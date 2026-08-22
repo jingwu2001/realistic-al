@@ -1,0 +1,92 @@
+trainer:
+  seed: 12345
+  batch_size: 64
+  num_workers: 16
+  persistent_workers: true
+  max_epochs: 50
+  min_epochs: 50
+  fast_dev_run: false
+  data_root: /home/jing/Desktop/realistic-al/datasets
+  experiments_root: /home/jing/Desktop/realistic-al/experiments/activelearning
+  experiment_name: mimic3_sand/active-mimic3_med/20260803-89844322/model-sand_drop-0.2_acq-gvendi_norm-minmax_kernel-rbf_gamma-median_ep-50_wl-True
+  experiment_id: 2026-08-04_10-20-23-239974
+  n_gpus: 1
+  check_val_every_n_epoch: 1
+  progress_bar_refresh_rate: 1
+  gradient_clip_val: 0
+  early_stop: false
+  precision: 32
+  deterministic: true
+  profiler: null
+  load_best_ckpt: true
+  save_last: false
+  timeout: 60
+  run_test: true
+  use_wandb: true
+  wandb_project: realistic-al
+  wandb_notes: ''
+  is_test: false
+  dry_run: false
+  wandb_test: false
+data:
+  name: mimic3_sand
+  shape:
+  - 24
+  - 387
+  num_classes: 2
+  val_split: 0.1
+  mean:
+  - 0.0
+  std:
+  - 1.0
+  transform_train: basic
+  transform_test: basic
+  balanced_sampling: false
+  balanced_test_val: false
+optim:
+  optimizer:
+    name: adam
+    momentum: 0.9
+  lr_scheduler:
+    name: steplr
+model:
+  name: sand
+  d_inp: 387
+  T: 24
+  d_static: 2
+  hid_dim: 64
+  num_heads: 4
+  num_layers: 4
+  r: 24
+  M: 12
+  dropout_p: 0.2
+  k: 10
+  weight_decay: 1.0e-05
+  learning_rate: 0.0005
+  use_ema: false
+  exclude_bn_bias: false
+  small_head: false
+  weighted_loss: true
+  load_pretrained: null
+  freeze_encoder: false
+  finetune: false
+active:
+  num_labelled: 900
+  min_train: 100
+  balanced: false
+  acq_size: 100
+  num_iter: 10
+  random_split: true
+  m: null
+query:
+  name: gvendi
+  vendi:
+    batch_size: 64
+    normalization: minmax
+    q: 1.0
+    gamma: median
+    kernel: rbf
+    approx: false
+    use_grad: true
+    grad_embedding_type: linear
+    labeled_true_labels: true

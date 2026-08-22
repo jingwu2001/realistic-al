@@ -1,0 +1,14 @@
+- data=mimic3_sand
+- model=sand
+- active=mimic3_med
+- query=bandit
+- optim=adam
+- ++query.bandit.num_classes=2
+- ++trainer.seed=12345
+- ++model.dropout_p=0.5
+- ++trainer.max_epochs=1
+- ++active.num_iter=2
+- ++active.acq_size=20
+- ++active.m=200
+- ++trainer.use_wandb=false
+- ++trainer.experiment_name=test_bandit_smoke

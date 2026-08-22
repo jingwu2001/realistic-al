@@ -1,0 +1,17 @@
+- model=resnet
+- query=bald
+- data=cifar10
+- active=cifar10_low
+- optim=sgd_cosine
+- ++data.val_size=250
+- ++trainer.seed=12345
+- ++trainer.max_epochs=50
+- ++model.dropout_p=0.5
+- ++model.learning_rate=0.1
+- ++model.use_ema=False
+- ++data.transform_train=cifar_randaugmentMC
+- ++trainer.precision=16
+- ++trainer.batch_size=1024
+- ++trainer.deterministic=True
+- ++active.num_iter=3
+- ++trainer.experiment_name=cifar10/active-cifar10_low/20260711-301b15aa/basic_model-resnet_drop-0.5_aug-cifar_randaugmentMC_acq-bald_ep-50

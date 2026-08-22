@@ -1,0 +1,7 @@
+- data=mimic3_sand
+- model=sand
+- active=mimic3_med
+- query=random
+- optim=adam
+- ++trainer.dry_run=true
+- ++trainer.use_wandb=false

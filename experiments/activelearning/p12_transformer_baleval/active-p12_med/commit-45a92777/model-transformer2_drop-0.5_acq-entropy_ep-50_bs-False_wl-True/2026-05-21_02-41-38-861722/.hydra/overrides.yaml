@@ -1,0 +1,17 @@
+- model=transformer2
+- query=entropy
+- data=p12_transformer_baleval
+- active=p12_med
+- optim=adam
+- ++data.balanced_sampling=False
+- ++model.weighted_loss=True
+- ++trainer.seed=12345
+- ++trainer.max_epochs=50
+- ++model.dropout_p=0.5
+- ++model.learning_rate=0.001
+- ++model.weight_decay=1e-05
+- ++model.use_ema=False
+- ++trainer.batch_size=64
+- ++trainer.precision=32
+- ++trainer.deterministic=True
+- ++trainer.experiment_name=p12_transformer_baleval/active-p12_med/commit-45a92777/model-transformer2_drop-0.5_acq-entropy_ep-50_bs-False_wl-True

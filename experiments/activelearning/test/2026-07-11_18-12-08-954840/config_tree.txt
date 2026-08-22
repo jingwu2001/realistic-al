@@ -1,0 +1,73 @@
+CONFIG
+├── trainer
+│   └── seed: 12345                                                             
+│       batch_size: 64                                                          
+│       num_workers: 16                                                         
+│       persistent_workers: true                                                
+│       max_epochs: 200                                                         
+│       min_epochs: 50                                                          
+│       fast_dev_run: false                                                     
+│       data_root: /home/jing/Desktop/realistic-al/datasets                     
+│       experiments_root: /home/jing/Desktop/realistic-al/experiments/activelear
+│       experiment_name: test                                                   
+│       experiment_id: 2026-07-11_18-12-08-954840                               
+│       n_gpus: 1                                                               
+│       check_val_every_n_epoch: 1                                              
+│       progress_bar_refresh_rate: 1                                            
+│       gradient_clip_val: 0                                                    
+│       early_stop: false                                                       
+│       precision: 32                                                           
+│       deterministic: false                                                    
+│       profiler: null                                                          
+│       load_best_ckpt: true                                                    
+│       save_last: false                                                        
+│       timeout: 60                                                             
+│       run_test: true                                                          
+│       use_wandb: true                                                         
+│       wandb_project: realistic-al                                             
+│       wandb_notes: ''                                                         
+│       is_test: false                                                          
+│       dry_run: true                                                           
+│                                                                               
+├── model
+│   └── name: bayesian_mnist                                                    
+│       weight_decay: 0                                                         
+│       learning_rate: 0.001                                                    
+│       load_pretrained: null                                                   
+│       freeze_encoder: false                                                   
+│       use_ema: false                                                          
+│       exclude_bn_bias: true                                                   
+│       k: 50                                                                   
+│       finetune: false                                                         
+│                                                                               
+├── active
+│   └── num_labelled: 1000                                                      
+│       min_train: 5500                                                         
+│       balanced: true                                                          
+│       acq_size: 1000                                                          
+│       num_iter: 10                                                            
+│       random_split: true                                                      
+│       m: null                                                                 
+│                                                                               
+├── data
+│   └── name: mnist                                                             
+│       shape:                                                                  
+│       - 28                                                                    
+│       - 28                                                                    
+│       - 1                                                                     
+│       num_classes: 10                                                         
+│       val_split: 100                                                          
+│       mean:                                                                   
+│       - 0.1307                                                                
+│       std:                                                                    
+│       - 0.3081                                                                
+│       transform_train: basic                                                  
+│       transform_test: basic                                                   
+│                                                                               
+└── optim
+    └── optimizer:                                                              
+          name: adam                                                            
+          momentum: 0.9                                                         
+        lr_scheduler:                                                           
+          name: steplr                                                          
+                                                                                

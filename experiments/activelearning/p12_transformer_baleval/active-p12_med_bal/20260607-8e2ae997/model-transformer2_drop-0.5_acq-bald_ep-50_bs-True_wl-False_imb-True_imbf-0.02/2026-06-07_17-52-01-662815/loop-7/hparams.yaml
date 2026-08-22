@@ -1,0 +1,86 @@
+trainer:
+  seed: 12347
+  batch_size: 64
+  num_workers: 16
+  persistent_workers: true
+  max_epochs: 50
+  min_epochs: 50
+  fast_dev_run: false
+  data_root: /home/jing/Desktop/realistic-al/datasets
+  experiments_root: /home/jing/Desktop/realistic-al/experiments/activelearning
+  experiment_name: p12_transformer_baleval/active-p12_med_bal/20260607-8e2ae997/model-transformer2_drop-0.5_acq-bald_ep-50_bs-True_wl-False_imb-True_imbf-0.02
+  experiment_id: 2026-06-07_17-52-01-662815
+  n_gpus: 1
+  check_val_every_n_epoch: 1
+  progress_bar_refresh_rate: 1
+  gradient_clip_val: 0
+  early_stop: false
+  precision: 32
+  deterministic: true
+  profiler: null
+  load_best_ckpt: true
+  save_last: false
+  timeout: 60
+  run_test: true
+  use_wandb: true
+  wandb_project: realistic-al
+  wandb_notes: p12 transformer baleval, balanced sampling, imb sweep
+  is_test: false
+  dry_run: false
+data:
+  name: p12_transformer
+  shape:
+  - 215
+  - 36
+  num_classes: 2
+  val_split: 0.1
+  mean:
+  - 0.0
+  std:
+  - 1.0
+  transform_train: basic
+  transform_test: basic
+  balanced_sampling: true
+  balanced_test_val: true
+  imbalance: true
+  imb_factor: 0.02
+optim:
+  optimizer:
+    name: adam
+    momentum: 0.9
+  lr_scheduler:
+    name: steplr
+model:
+  name: transformer2
+  d_inp: 36
+  d_model: 64
+  nhead: 4
+  nhid: 128
+  nlayers: 2
+  max_len: 215
+  d_static: 9
+  MAX: 10000
+  perc: 0.25
+  aggreg: mean
+  use_static: true
+  dropout_p: 0.5
+  k: 10
+  weight_decay: 1.0e-05
+  learning_rate: 0.001
+  use_ema: false
+  exclude_bn_bias: false
+  small_head: false
+  weighted_loss: false
+  load_pretrained: null
+  freeze_encoder: false
+  finetune: false
+active:
+  num_labelled: 800
+  min_train: 100
+  balanced: true
+  acq_size: 100
+  num_iter: 10
+  random_split: true
+  m: null
+query:
+  name: bald

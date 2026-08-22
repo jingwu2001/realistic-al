@@ -1,0 +1,4 @@
+- trainer.dry_run=True
+- query=vendi
+- trainer.use_wandb=True
+- data=cifar10

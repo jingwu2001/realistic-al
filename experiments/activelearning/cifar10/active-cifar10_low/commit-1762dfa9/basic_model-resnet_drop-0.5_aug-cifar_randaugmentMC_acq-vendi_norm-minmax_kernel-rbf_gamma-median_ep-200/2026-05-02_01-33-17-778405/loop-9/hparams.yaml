@@ -1,0 +1,81 @@
+trainer:
+  seed: 12347
+  batch_size: 1024
+  num_workers: 16
+  persistent_workers: true
+  max_epochs: 200
+  min_epochs: 50
+  fast_dev_run: false
+  data_root: /home/jing/Desktop/realistic-al/datasets
+  experiments_root: /home/jing/Desktop/realistic-al/experiments/activelearning
+  experiment_name: cifar10/active-cifar10_low/commit-1762dfa9/basic_model-resnet_drop-0.5_aug-cifar_randaugmentMC_acq-vendi_norm-minmax_kernel-rbf_gamma-median_ep-200
+  experiment_id: 2026-05-02_01-33-17-778405
+  n_gpus: 1
+  check_val_every_n_epoch: 1
+  progress_bar_refresh_rate: 1
+  gradient_clip_val: 0
+  early_stop: false
+  precision: 16
+  deterministic: true
+  profiler: null
+  load_best_ckpt: true
+  save_last: false
+  timeout: 60
+  run_test: true
+data:
+  name: cifar10
+  shape:
+  - 32
+  - 32
+  - 3
+  num_classes: 10
+  val_split: 5000
+  mean:
+  - 0.4914
+  - 0.4822
+  - 0.4465
+  std:
+  - 0.2023
+  - 0.1994
+  - 0.201
+  transform_train: cifar_randaugmentMC
+  transform_test: basic
+  val_size: 250
+optim:
+  optimizer:
+    name: sgd
+    momentum: 0.9
+    nesterov: true
+  lr_scheduler:
+    name: cosine_decay
+    warmup_epochs: 10
+model:
+  name: bayesian_resnet
+  base_model: resnet18
+  weight_decay: 0.005
+  learning_rate: 0.1
+  dropout_p: 0.5
+  load_pretrained: null
+  freeze_encoder: false
+  use_ema: false
+  exclude_bn_bias: true
+  k: 50
+  finetune: false
+  small_head: true
+active:
+  num_labelled: 500
+  min_train: 5500
+  balanced: true
+  acq_size: 50
+  num_iter: 10
+  random_split: true
+  m: null
+query:
+  name: vendi
+  vendi:
+    batch_size: 64
+    normalization: minmax
+    q: 1.0
+    gamma: median
+    kernel: rbf
+    approx: false

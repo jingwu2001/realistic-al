@@ -1,0 +1,4 @@
+iteration,train_time_s,query_time_s,eig_time_s
+0,49.3395,46.8096,
+1,48.8133,114.4292,
+2,49.0618,158.5914,
