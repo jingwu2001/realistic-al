@@ -136,6 +136,11 @@ def _bandit_variant(cfg: DictConfig):
 _METHOD_VARIANT = {
     "vendi": _vendi_variant,
     "gvendi": _vendi_variant,  # config alias of vendi (use_grad=true)
+    # vendi-q2 (closed-form q=2) shares the vendi kernel block; both the
+    # feature (vendi-q2) and gradient (gvendi-q2) configs carry name
+    # "vendi-q2", so the emb token ("feat"/"grad") from use_grad keeps the two
+    # apart, and the kernel token encodes gamma (rbfdim / rbf1.0 / cos).
+    "vendi-q2": _vendi_variant,
     "bandit": _bandit_variant,
 }
 
