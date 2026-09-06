@@ -1,0 +1,14 @@
+defaults:
+  - /query/vendi@_here_
+
+# vendi-q2 = Vendi-score acquisition specialised to Renyi q=2, computed in
+# CLOSED FORM (VS_2 = trace(K)^2 / ||K||_F^2) with NO eigendecomposition — so
+# none of the cuSOLVER convergence failures the general vendi path guards
+# against. Same vendi block as `vendi`; q is pinned to 2 (the closed form
+# ignores it, but it documents intent) and the kernel MUST be unit-diagonal
+# (rbf or cosine) — `linear` is rejected because the shortcut relies on a
+# constant diagonal. Flip to gradient embeddings with
+# ++query.vendi.use_grad=true (or use the `gvendi-q2` alias).
+name: vendi-q2
+vendi:
+  q: 2.0

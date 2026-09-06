@@ -12,13 +12,16 @@ from scipy import stats
 from torch.utils.data import DataLoader
 
 from .kcenterGreedy import KCenterGreedy
+# NOTE: `.vendi` does `from .query_diversity import *`, so importing it here at
+# module top would hit a partial-init cycle (vendi would see none of the
+# helpers defined below). It is imported lazily in the dispatch branch instead.
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from models.bayesian_module import BayesianModule
 from utils.timer import Timer
 
 
-NAMES = ["kcentergreedy", "badge", "vendi", "gvendi"]
+NAMES = ["kcentergreedy", "badge", "vendi", "gvendi", "vendi-q2", "vendi-q2-sequential"]
 
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -94,6 +97,27 @@ def query_sampler(
         )
 
         return indices, scores, extra_info
+    elif name == "vendi-q2":
+        # closed-form Vendi score for q=2 (no eigendecomposition); honors the
+        # same cfg.query.vendi settings (incl. use_grad for the gvendi path)
+        indices, scores, extra_info = _get_vendi_q2(
+            cfg, model, labeled_dataloader, unlabeled_dataloader, acq_size=acq_size
+        )
+
+        return indices, scores, extra_info
+
+    elif name == "vendi-q2-sequential":
+        # greedy/batched sequential variant: pick batch_size at a time, fold the
+        # picks into the labeled set, repeat. Returns selection order only, so —
+        # like kcentergreedy/badge — emit a descending numeric ranking.
+        # lazy import: .vendi imports * from this module (see note at top)
+        from .vendi import _get_vendi_q2_sequential
+        indices = _get_vendi_q2_sequential(
+            cfg, model, labeled_dataloader, unlabeled_dataloader, acq_size=acq_size
+        )
+        indices = np.asarray(indices)
+
+        return indices, np.arange(len(indices))[::-1]
     else:
         raise NotImplementedError
 
@@ -367,6 +391,184 @@ def get_vendi_embeddings(vendi_cfg, model, labeled_dataloader, pool_loader):
 
     return emb_labeled, emb_unlabeled, grad_norms
 
+def _boundary_tie_stats(
+    rank_scores: np.ndarray,
+    acq_indices: np.ndarray,
+    acq_size: int,
+    rtol: float = 1e-9,
+    atol: float = 1e-12,
+) -> dict:
+    """Detect ranking-key ties at the top-B acquisition boundary.
+
+    The batch is the top ``acq_size`` samples by ``rank_scores``; argsort breaks
+    exact/near ties arbitrarily. So if any UNacquired sample shares the smallest
+    acquired ranking-key value, it was excluded from the batch purely by the
+    tie-break rather than by being genuinely less diverse.
+
+    Args:
+        rank_scores: (U,) ranking keys over the whole pool (higher = acquired).
+        acq_indices: (acq_size,) pool indices actually acquired.
+        acq_size: batch size B.
+        rtol, atol: tolerance passed to np.isclose (near-duplicates count as ties).
+
+    Returns:
+        dict with the boundary value, how many pool samples tie it, and how many
+        of those tied samples were acquired vs excluded. n_tied_excluded > 0 means
+        the batch boundary is ambiguous (samples dropped only by luck).
+    """
+    n = len(rank_scores)
+    if acq_size <= 0 or acq_size >= n:
+        # nothing acquired, or the whole pool acquired -> no boundary exists
+        return {
+            "boundary_value": None,
+            "n_tied": 0,
+            "n_tied_acquired": 0,
+            "n_tied_excluded": 0,
+        }
+
+    # smallest ranking key among the acquired samples = the acquisition cutoff
+    boundary = float(rank_scores[acq_indices].min())
+    tied_mask = np.isclose(rank_scores, boundary, rtol=rtol, atol=atol)
+    acq_mask = np.zeros(n, dtype=bool)
+    acq_mask[acq_indices] = True
+
+    n_tied = int(tied_mask.sum())
+    n_tied_acquired = int((tied_mask & acq_mask).sum())
+    return {
+        "boundary_value": boundary,
+        "n_tied": n_tied,
+        "n_tied_acquired": n_tied_acquired,
+        "n_tied_excluded": n_tied - n_tied_acquired,
+    }
+
+
+def _get_vendi_q2(
+    cfg,
+    model: torch.nn.Module,
+    labeled_dataloader: DataLoader,
+    pool_loader: DataLoader,
+    acq_size: int = 128,
+    ):
+    """Vendi score special case with q=2.
+    Eliminates the need of calculating eigenvalues (see vendi_q2_from_features).
+
+    Same acquisition contract as _get_vendi: returns
+        (acq_indices, sorted_scores[:acq_size], extra_info_dict).
+    """
+    vendi_cfg = cfg.query.vendi
+
+    emb_labeled, emb_unlabeled, grad_norms = get_vendi_embeddings(
+        vendi_cfg, model, labeled_dataloader, pool_loader
+    )
+
+    emb_labeled, emb_unlabeled = normalize_features(
+        emb_labeled, emb_unlabeled, vendi_cfg.normalization
+    )
+    # emb_labeled: (num_labeled, emb_dim)
+    # emb_unlabeled: (num_unlabeled, emb_dim)
+
+    rank_scores, true_scores = vendi_q2_from_features(
+        vendi_cfg, emb_labeled, emb_unlabeled
+    )
+    # rank_scores / true_scores: (num_unlabeled,)
+
+    del emb_labeled, emb_unlabeled
+    torch.cuda.empty_cache()
+
+    # Rank on the division-free key (exact VS_2 ordering, no 1/x), but report the
+    # true VS_2 values in the same descending order.
+    sorted_indices = np.argsort(rank_scores)[::-1]
+    sorted_scores = true_scores[sorted_indices]
+    acq_indices = sorted_indices[:acq_size]
+
+    extra_info_dict = calculate_extra_info(acq_size, sorted_scores)
+    extra_info_dict["eig_time_s"] = 0.0  # no eigensolve on the q=2 path
+
+    # ranking key in acquisition (descending) order — the first acq_size entries
+    # are exactly the acquired batch, so the boundary sits at index acq_size.
+    extra_info_dict["rank_scores"] = rank_scores[sorted_indices]
+
+    # Spread of the ACTUAL VS_2 scores across the whole pool. A tight spread
+    # means the method barely discriminates between candidates (near-ties
+    # everywhere); a wide one means the ranking is meaningful.
+    extra_info_dict["score_spread"] = {
+        "min": float(np.min(true_scores)),
+        "max": float(np.max(true_scores)),
+        "mean": float(np.mean(true_scores)),
+        "std": float(np.std(true_scores)),
+        "range": float(np.ptp(true_scores)),
+    }
+
+    # Ties at the top-B boundary: since argsort breaks ties arbitrarily, any
+    # UNacquired sample whose ranking key equals the smallest acquired key was
+    # dropped from the batch purely by luck. n_tied_excluded > 0 answers "are
+    # some samples not queried only because of a tie-break?".
+    extra_info_dict["boundary_ties"] = _boundary_tie_stats(
+        rank_scores, acq_indices, acq_size
+    )
+
+    if grad_norms is not None:
+        # mirror _get_vendi: raw-gradient-norm diagnostics reordered by ranking
+        norm_stats = calculate_extra_info(acq_size, grad_norms[sorted_indices])
+        extra_info_dict["grad_norm_acq"] = norm_stats["acq"]
+        extra_info_dict["grad_norm_else"] = norm_stats["else"]
+        extra_info_dict["grad_norms_acquired"] = grad_norms[acq_indices]
+
+    return acq_indices, sorted_scores[:acq_size], extra_info_dict
+
+
+def vendi_q2_from_features(vendi_cfg, feat_labeled, feat_unlabeled):
+    """Calculates the Vendi score with Renyi q=2 from the labeled and unlabeled features
+    """
+    if vendi_cfg.kernel == 'linear':
+        raise ValueError("Unsupported kernel: linear")
+    # gamma only matters for rbf; skip the pairwise-distance heuristic otherwise
+    gamma = (
+        resolve_gamma(vendi_cfg.gamma, feat_labeled)
+        if vendi_cfg.kernel == "rbf"
+        else None
+    )
+
+    # Cast embeddings to float64 BEFORE the kernel so the dot-product
+    # accumulation happens in double precision — for high-dim gradient
+    # embeddings (gvendi) a float32 matmul over C*Z dims is the lossy step;
+    # casting the kernel result afterwards would be too late.
+    feat_labeled = feat_labeled.to(DEVICE, torch.float64)
+    feat_unlabeled = feat_unlabeled.to(DEVICE, torch.float64)
+
+    # The score is (\sum p_i^2)^-1
+    # proportional to (\sum K_ij^2)^-1
+    # so we only need to pick the smallest \sum K_ij^2
+    K_UL = compute_kernel_matrix(vendi_cfg.kernel, gamma, feat_unlabeled, feat_labeled) # (U, L)
+    K_UL = torch.as_tensor(K_UL, dtype=torch.float64, device=DEVICE)
+    assert torch.isfinite(K_UL).all(), "non-finite entries in K_UL"
+
+    # sum of non-negative squares -> no cancellation; exclude the constant
+    # ||K_LL||_F^2 so the varying signal is not swamped in finite precision.
+    rank_scores = -(K_UL ** 2).sum(dim=1) # inversely proportional to the actual scores
+
+    # Calculate the actual score
+    K_LL = compute_kernel_matrix(vendi_cfg.kernel, gamma, feat_labeled, feat_labeled)
+    K_LL = torch.as_tensor(K_LL, dtype=torch.float64, device=DEVICE)
+    assert torch.isfinite(K_LL).all(), "non-finite entries in K_LL"
+
+    diag_U = kernel_self_similarity(vendi_cfg.kernel, feat_unlabeled)
+    diag_U = torch.as_tensor(diag_U, dtype=torch.float64, device=DEVICE)
+
+    frob_LL = (K_LL ** 2).sum()
+    trace_aug = torch.diagonal(K_LL).sum() + diag_U
+    frob_aug = frob_LL + 2.0 * (-rank_scores) + diag_U ** 2
+
+    # actual VS_2, for logging only (denominator >= 1 => well conditioned)
+    true_scores = (trace_aug ** 2) / frob_aug.clamp(min=1e-12)
+
+    rank_scores = rank_scores.detach().cpu().numpy()
+    true_scores = true_scores.detach().cpu().numpy()
+
+    del K_UL, K_LL
+    torch.cuda.empty_cache()
+
+    return rank_scores, true_scores
 
 def _get_vendi(
     cfg,
@@ -472,6 +674,9 @@ def rbf_kernel(x, y=None, gamma=None):
     x: (N, D)
     y: (M, D)
     gamma: float
+
+    Returns:
+        kernel matrix shaped (N, M)
     """
     if y is None:
         y = x
@@ -731,16 +936,54 @@ def kernel_self_similarity(kernel: str, x: torch.Tensor) -> torch.Tensor:
     else:
         raise ValueError(f"Unknown kernel: {kernel}")
 
+def vendi_q2_sequential_from_features(vendi_cfg, feat_labeled, feat_unlabeled, batch_size):
+    """Calculates the Vendi score with Renyi q=2 from the labeled and unlabeled features
+    """
+    if vendi_cfg.kernel == 'linear':
+        raise ValueError("Unsupported kernel: linear")
+    # gamma only matters for rbf; skip the pairwise-distance heuristic otherwise
+    gamma = (
+        resolve_gamma(vendi_cfg.gamma, feat_labeled)
+        if vendi_cfg.kernel == "rbf"
+        else None
+    )
 
-# TODO: 
-# 0. add docstring indicating input/output/variable shapes (Done)
-# 1. implement cosine kernel logic  (Done)
-# 2. refactor the code
-# 3. sweep different kernel and hyperparameters (rbf gamma)
-# 4. add more options to vendi config
-# 5. debug 
+    feat_labeled = feat_labeled.to(DEVICE, torch.float64)
+    feat_unlabeled = feat_unlabeled.to(DEVICE, torch.float64)
 
-# 6. implement time series
+    # The score is (\sum p_i^2)^-1
+    # proportional to (\sum K_ij^2)^-1
+    # so we only need to pick the smallest \sum K_ij^2
+    K_UL = compute_kernel_matrix(vendi_cfg.kernel, gamma, feat_unlabeled, feat_labeled) # (U, L)
+    K_UL = torch.as_tensor(K_UL, dtype=torch.float64, device=DEVICE)
+    assert torch.isfinite(K_UL).all(), "non-finite entries in K_UL"
+
+    # sum of non-negative squares -> no cancellation; exclude the constant
+    # ||K_LL||_F^2 so the varying signal is not swamped in finite precision.
+    rank_scores = -(K_UL ** 2).sum(dim=1) # inversely proportional to the actual scores
+
+    # Calculate the actual score
+    K_LL = compute_kernel_matrix(vendi_cfg.kernel, gamma, feat_labeled, feat_labeled)
+    K_LL = torch.as_tensor(K_LL, dtype=torch.float64, device=DEVICE)
+    assert torch.isfinite(K_LL).all(), "non-finite entries in K_LL"
+
+    diag_U = kernel_self_similarity(vendi_cfg.kernel, feat_unlabeled)
+    diag_U = torch.as_tensor(diag_U, dtype=torch.float64, device=DEVICE)
+
+    frob_LL = (K_LL ** 2).sum()
+    trace_aug = torch.diagonal(K_LL).sum() + diag_U
+    frob_aug = frob_LL + 2.0 * (-rank_scores) + diag_U ** 2
+
+    # actual VS_2, for logging only (denominator >= 1 => well conditioned)
+    true_scores = (trace_aug ** 2) / frob_aug.clamp(min=1e-12)
+
+    rank_scores = rank_scores.detach().cpu().numpy()
+    true_scores = true_scores.detach().cpu().numpy()
+
+    del K_UL, K_LL
+    torch.cuda.empty_cache()
+
+    return rank_scores, true_scores
 
 if __name__ == '__main__':
     x = torch.rand(3, 10)

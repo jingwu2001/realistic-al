@@ -1,0 +1,15 @@
+defaults:
+  - /query/vendi@_here_
+
+# vendi-q2-sequential = the closed-form Renyi q=2 Vendi acquisition (see
+# vendi-q2.yaml) run GREEDILY: instead of scoring the whole pool once, it picks
+# `vendi.batch_size` points, folds them into the labeled set, and repeats until
+# acq_size is reached. Because VS_2's rank signal only depends on
+# k(chosen, unlabeled), each round just subtracts the newly chosen batch's
+# k^2 contribution and masks the picks — no eigendecomposition, no rescoring
+# from scratch. batch_size=1 is fully greedy; larger batches are the lazy
+# approximation. Same unit-diagonal-kernel constraint as vendi-q2 (rbf/cosine).
+name: vendi-q2-sequential
+vendi:
+  q: 2.0
+  batch_size: 10
