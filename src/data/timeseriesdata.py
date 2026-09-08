@@ -45,6 +45,7 @@ class TimeSeriesDM(BaseDataModule):
         val_size: Optional[int] = None,
         balanced_sampling: bool = False,
         balanced_test_val: bool = False, # Forces test set and validation set to be balanced
+        single_stay_only: bool = False, # mimic3_sand: keep only patients with exactly one ICU stay
     ):
         super().__init__(
             val_split=val_split,
@@ -84,6 +85,7 @@ class TimeSeriesDM(BaseDataModule):
         self.imb_type = imb_type
         self.imb_factor = imb_factor
         self.balanced_test_val = balanced_test_val
+        self.single_stay_only = single_stay_only
 
         ### IMPLEMENTATION ###
         # Novel image datasets can be added here
@@ -230,8 +232,136 @@ class TimeSeriesDM(BaseDataModule):
 
         return to_idx(test_sel), to_idx(val_sel), to_idx(pool_sel)
 
+    def _grouped_val_pool_split(self, labels, groups, val_size, balanced_eval=False):
+        """Carve a patient-grouped validation set (~``val_size`` samples) from
+        the train object; the remainder is the labelled pool. This is a 2-way
+        split (test is a fixed, separate on-disk object for mimic3_sand). Seeded
+        by ``self.seed`` so the validation split varies per seed while the test
+        cohort stays fixed. Degenerates to a plain stratified split when every
+        group is a singleton (the single-stay cohort).
+        """
+        labels = np.asarray(labels)
+        groups = np.asarray(groups)
+        rng = np.random.default_rng(self.seed)
+
+        order = np.argsort(groups, kind="stable")
+        _, start = np.unique(groups[order], return_index=True)
+        member_lists = np.split(order, start[1:])
+        group_label = np.array([int(labels[m].max()) for m in member_lists])
+        group_pos = np.array([int(labels[m].sum()) for m in member_lists])
+        group_neg = np.array([len(m) for m in member_lists]) - group_pos
+
+        n_total = len(labels)
+        pos_total = int((labels == 1).sum())
+        neg_total = n_total - pos_total
+        if balanced_eval:
+            v_pos = v_neg = max(1, val_size // 2)
+        else:
+            v_pos = max(1, round(pos_total * val_size / n_total))
+            v_neg = max(1, round(neg_total * val_size / n_total))
+
+        pos_groups = np.where(group_label == 1)[0]
+        neg_groups = np.where(group_label == 0)[0]
+        rng.shuffle(pos_groups)
+        rng.shuffle(neg_groups)
+
+        sel, got_pos, got_neg, p_ptr, n_ptr = [], 0, 0, 0, 0
+        while p_ptr < len(pos_groups) and got_pos < v_pos:
+            gi = pos_groups[p_ptr]; p_ptr += 1
+            sel.append(gi); got_pos += group_pos[gi]; got_neg += group_neg[gi]
+        while n_ptr < len(neg_groups) and got_neg < v_neg:
+            gi = neg_groups[n_ptr]; n_ptr += 1
+            sel.append(gi); got_pos += group_pos[gi]; got_neg += group_neg[gi]
+        pool_groups = list(pos_groups[p_ptr:]) + list(neg_groups[n_ptr:])
+        assert pool_groups, f"no groups left for the pool (val_size={val_size})"
+
+        def to_idx(s):
+            return (np.concatenate([member_lists[g] for g in s])
+                    if s else np.array([], dtype=int))
+
+        return np.sort(to_idx(sel)), np.sort(to_idx(pool_groups))
+
+    def _balanced_indices(self, labels):
+        """Indices of a class-balanced subset (equal per class, majority
+        downsampled), used to build balanced eval sets from a fixed test/val
+        object when ``balanced_test_val`` is set."""
+        labels = np.asarray(labels)
+        rng = np.random.default_rng(self.seed)
+        classes, counts = np.unique(labels, return_counts=True)
+        k = int(counts.min())
+        sel = []
+        for c in classes:
+            idx = np.where(labels == c)[0]
+            rng.shuffle(idx)
+            sel.append(idx[:k])
+        return np.sort(np.concatenate(sel))
+
+    def _cohort_indices(self, labels, groups):
+        """Indices (into the full dataset) of the samples to actually use.
+
+        Generic: depends only on ``groups``, so it works for any grouped
+        dataset. By default every sample is used. With ``single_stay_only`` only
+        samples whose group (patient id) occurs exactly once are kept — i.e.
+        patients with a single ICU stay; the rest of the pipeline (split,
+        wrapping) then runs on that restricted universe.
+        """
+        n = len(labels)
+        if not self.single_stay_only:
+            return np.arange(n)
+        if groups is None:
+            raise ValueError(
+                "single_stay_only requires group ids (e.g. subject_ids); "
+                "the loaded dataset exposes none."
+            )
+        groups = np.asarray(groups)
+        uniq, counts = np.unique(groups, return_counts=True)
+        singletons = uniq[counts == 1]
+        allowed = np.where(np.isin(groups, singletons))[0]
+        print(
+            f"single_stay_only: keeping {len(allowed)}/{n} stays from "
+            f"{len(singletons)} single-stay patients"
+        )
+        return allowed
+
     def _setup_datasets(self):
         """Creates the active training dataset and validation and test datasets"""
+        # ------------------------------------------------------------------ #
+        # mimic3_sand: CIFAR-style fixed pre-split. The dataset ships fixed    #
+        # train/test objects per cohort (built by preprocess_mimic3_sand.py),  #
+        # so the test cohort is identical across seeds. We only carve the      #
+        # validation set from the train object, per seed.                      #
+        # ------------------------------------------------------------------ #
+        if self.dataset == "mimic3_sand":
+            _root = os.path.join(self.data_root, "mimic3_sand")
+
+            _train_obj = self.dataset_cls(_root, train=True, single_stay_only=self.single_stay_only)
+            _n_train_obj = len(_train_obj.targets)
+            _val_size = (self.val_split if isinstance(self.val_split, int)
+                         else max(1, round(self.val_split * _n_train_obj)))
+            _val_idx, _pool_idx = self._grouped_val_pool_split(
+                _train_obj.targets, _train_obj.groups, _val_size,
+                balanced_eval=self.balanced_test_val,
+            )
+
+            # train (labelled pool universe)
+            self.train_set = ActiveSubset(
+                self.dataset_cls(_root, train=True, single_stay_only=self.single_stay_only), _pool_idx
+            )
+            if self.active:
+                # handles normalisation internally; no transform attribute
+                self.train_set = ActiveLearningDataset(self.train_set)
+
+            # validation (carved from the train object, per seed)
+            _val_full = self.dataset_cls(_root, train=True, single_stay_only=self.single_stay_only)
+            self.val_set = Subset(_val_full, _val_idx)
+
+            # test (fixed on-disk object, identical across seeds)
+            _test_full = self.dataset_cls(_root, train=False, single_stay_only=self.single_stay_only)
+            _test_idx = (self._balanced_indices(_test_full.targets)
+                         if self.balanced_test_val else np.arange(len(_test_full)))
+            self.test_set = Subset(_test_full, _test_idx)
+            return
+
         # ------------------------------------------------------------------ #
         # Pre-compute stratified split indices for datasets that don't ship   #
         # with their own train/test files (ECG5000, P12).                     #
@@ -251,33 +381,43 @@ class TimeSeriesDM(BaseDataModule):
                 balanced_eval=self.balanced_test_val,
             )
 
-        if self.dataset in ("p12", "p12_transformer", "mimic3_sand"):
-            if self.dataset == "mimic3_sand":
-                _ts_root    = os.path.join(self.data_root, "mimic3_sand")
-            else:
-                _ts_root    = os.path.join(self.data_root, "P12data/processed_data")
+        if self.dataset in ("p12", "p12_transformer"):
+            _ts_root        = os.path.join(self.data_root, "P12data/processed_data")
             _ts_meta        = self.dataset_cls(root=_ts_root)
             _ts_labels      = _ts_meta.targets
             _ts_groups      = getattr(_ts_meta, "groups", None)
-            _ts_n_total     = len(_ts_labels)
+
+            # Restrict to the desired cohort (e.g. single-stay patients) before
+            # splitting. ``allowed`` indexes into the full dataset; the split is
+            # drawn on this restricted universe and mapped back afterwards.
+            allowed         = self._cohort_indices(_ts_labels, _ts_groups)
+            _sub_labels     = _ts_labels[allowed]
+            _sub_groups     = None if _ts_groups is None else _ts_groups[allowed]
+            _ts_n_total     = len(allowed)
             _ts_test_size   = max(1, round(0.1 * _ts_n_total))
             _ts_val_size    = (self.val_split if isinstance(self.val_split, int)
                                else max(1, round(self.val_split * _ts_n_total)))
-            if _ts_groups is not None:
-                # Patient-grouped split (mimic3_sand): keep all of a patient's
-                # ICU stays in the same split to avoid train/test leakage.
-                _ts_test_idx, _ts_val_idx, _ts_pool_idx = (
-                    self._grouped_stratified_3way_split(
-                        _ts_labels, _ts_groups, _ts_n_total,
-                        _ts_test_size, _ts_val_size,
-                        balanced_eval=self.balanced_test_val,
-                    )
-                )
-            else:
-                _ts_test_idx, _ts_val_idx, _ts_pool_idx = self._stratified_3way_split(
-                    _ts_labels, _ts_n_total, _ts_test_size, _ts_val_size,
+            # Grouping only matters when some group carries >1 sample.
+            _needs_grouping = (
+                _sub_groups is not None
+                and np.unique(_sub_groups).size < _sub_groups.size
+            )
+            if _needs_grouping:
+                # patient-level split
+                _rel_test, _rel_val, _rel_pool = self._grouped_stratified_3way_split(
+                    _sub_labels, _sub_groups, _ts_n_total,
+                    _ts_test_size, _ts_val_size,
                     balanced_eval=self.balanced_test_val,
                 )
+            else:
+                _rel_test, _rel_val, _rel_pool = self._stratified_3way_split(
+                    _sub_labels, _ts_n_total, _ts_test_size, _ts_val_size,
+                    balanced_eval=self.balanced_test_val,
+                )
+            # Map split-relative indices back to full-dataset indices.
+            _ts_test_idx = allowed[_rel_test]
+            _ts_val_idx  = allowed[_rel_val]
+            _ts_pool_idx = allowed[_rel_pool]
 
         # ------------------------------------------------------------------ #
         # Build train (pool) set                                               #
@@ -288,7 +428,7 @@ class TimeSeriesDM(BaseDataModule):
                 root=ecg_root, split="all", transform=self.train_transforms
             )
             self.train_set = ActiveSubset(_ecg_full_train, _ecg_pool_idx)
-        elif self.dataset in ("p12", "p12_transformer", "mimic3_sand"):
+        elif self.dataset in ("p12", "p12_transformer"):
             _ts_full = self.dataset_cls(root=_ts_root)
             self.train_set = ActiveSubset(_ts_full, _ts_pool_idx)
 
@@ -298,7 +438,7 @@ class TimeSeriesDM(BaseDataModule):
             )
 
         if self.active:
-            if self.dataset in ("p12", "p12_transformer", "mimic3_sand"):
+            if self.dataset in ("p12", "p12_transformer"):
                 # These datasets handle normalisation internally and have no transform attribute.
                 self.train_set = ActiveLearningDataset(self.train_set)
             else:
@@ -316,7 +456,7 @@ class TimeSeriesDM(BaseDataModule):
             )
             self.val_set  = Subset(_ecg_full_eval, _ecg_val_idx)
             self.test_set = Subset(_ecg_full_eval, _ecg_test_idx)
-        elif self.dataset in ("p12", "p12_transformer", "mimic3_sand"):
+        elif self.dataset in ("p12", "p12_transformer"):
             _ts_full_eval = self.dataset_cls(root=_ts_root)
             self.val_set   = Subset(_ts_full_eval, _ts_val_idx)
             self.test_set  = Subset(_ts_full_eval, _ts_test_idx)

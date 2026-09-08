@@ -50,6 +50,9 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> BaseData
     balanced_test_val = False
     if "balanced_test_val" in cfg.data:
         balanced_test_val = cfg.data.balanced_test_val
+    single_stay_only = False
+    if "single_stay_only" in cfg.data:
+        single_stay_only = cfg.data.single_stay_only
 
     time_series_datasets = {"ecg5000", "p12", "p12_transformer", "mimic3_sand"}
     dm_cls = TimeSeriesDM if cfg.data.name in time_series_datasets else TorchVisionDM
@@ -78,6 +81,7 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> BaseData
         val_size=val_size,
         balanced_sampling=balanced_sampling,
         balanced_test_val=balanced_test_val,
+        single_stay_only=single_stay_only,
     )
 
     return datamodule

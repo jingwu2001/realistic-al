@@ -1,5 +1,6 @@
 """
-One-time converter: STraTS-preprocessed MIMIC-III -> dense SAND-format arrays.
+One-time converter: STraTS-preprocessed MIMIC-III -> dense SAND-format arrays,
+pre-split into fixed train/test objects (CIFAR-style ``train=True/False``).
 
 Reads the pickle produced by STraTS' preprocess_mimic_iii_large.py
 (a 5-tuple: event dataframe, outcomes dataframe, train/val/test id arrays)
@@ -15,24 +16,29 @@ and replicates the STraTS Dataset pipeline for model_type='sand'
   6. mean-fill unobserved values, then z-normalise per variable
   7. X = concat([values, obs, delta], axis=-1) -> (N, T, 3V)
 
-Deviation from STraTS: normalisation / fill statistics are computed over the
-FULL dataset instead of a fixed train split, because the AL framework
-(TimeSeriesDM) draws its own stratified train/val/test splits per seed.
-This matches how the P12 datasets in this repo are normalised.
+Fixed split: we reuse STraTS's own patient-grouped split (the train/val/test id
+arrays baked in the pickle) so the test cohort is identical across seeds and to
+the STraTS paper. STraTS's train+val become one ``train`` object (TimeSeriesDM
+carves the per-seed validation set from it); STraTS's test becomes the fixed
+``test`` object. This removes the per-seed test resampling that dominated
+cross-seed AUPRC variance, mirroring CIFAR's fixed ``train=False`` test.
 
-The STraTS train/val/test ids baked into the pickle are *not* reused; they were
-drawn once with a fixed seed. Instead we emit the patient id (SUBJECT_ID) of
-every stay so TimeSeriesDM can draw a *patient-grouped* split per seed — all
-ICU stays of a patient land in the same split, avoiding train/test leakage
-(a patient may have several stays, and STraTS reference splits at the patient
-level; see preprocess_mimic_iii_large.py).
+Two cohorts are emitted (selectable at load time via ``single_stay_only``):
+  all         - every ICU stay (44,812)
+  single_stay - only patients with exactly one ICU stay (26,609)
+The single-stay cohort filters STraTS's split to single-stay patients; because
+STraTS splits by patient, the 64/16/20 ratio is preserved and no patient leaks.
 
-Output (written to <out>/):
-  X.npy            (N, 24, 3V) float32
-  demo.npy         (N, 2)      float32   z-normalised Age, Gender
-  targets.npy      (N,)        int64     in-hospital mortality
-  subject_ids.npy  (N,)        int64     MIMIC-III SUBJECT_ID (patient id)
-  meta.json        variable names, static names, T, V
+Normalisation / mean-fill statistics are computed over each cohort's ``train``
+object only (train+val), not the test set -- the CIFAR convention (fixed
+constants from the training set), which also avoids test leakage.
+
+Output layout (written under <out>/):
+  all/train/{X,demo,targets,subject_ids}.npy
+  all/test/{X,demo,targets,subject_ids}.npy
+  single_stay/train/{...}.npy
+  single_stay/test/{...}.npy
+  meta.json   (variable names, static names, T, V, per-cohort split sizes)
 
 Usage:
   conda run -n real-al python src/data/preprocess_mimic3_sand.py \
@@ -50,6 +56,36 @@ import pickle
 import numpy as np
 
 STATIC_VARIS = ["Age", "Gender"]
+
+
+def normalise_cohort(values_raw, obs, demo_raw, train_idx):
+    """Mean-fill + z-normalise ``values`` and z-normalise ``demo`` using TRAIN
+    statistics only, applied to the whole cohort. Returns (values, demo)."""
+    tr = train_idx
+    V = values_raw.shape[-1]
+    # mean-fill: per-variable observed mean over train stays
+    obs_counts = np.maximum(obs[tr].sum(axis=(0, 1)), 1)
+    fill_means = (values_raw[tr] * obs[tr]).sum(axis=(0, 1)) / obs_counts
+    values = values_raw * obs + (1 - obs) * fill_means.reshape((1, 1, V))
+    # z-normalise values (train mean/std, after fill)
+    means = values[tr].mean(axis=(0, 1), keepdims=True)
+    stds = values[tr].std(axis=(0, 1), keepdims=True)
+    stds = (stds == 0) * 1 + (stds > 0) * stds
+    values = ((values - means) / stds).astype(np.float32)
+    # z-normalise demo (train mean/std)
+    dmeans = demo_raw[tr].mean(axis=0, keepdims=True)
+    dstds = demo_raw[tr].std(axis=0, keepdims=True)
+    dstds = (dstds == 0) + (dstds > 0) * dstds
+    demo = ((demo_raw - dmeans) / dstds).astype(np.float32)
+    return values, demo
+
+
+def save_object(out_dir, X, demo, y, sid):
+    os.makedirs(out_dir, exist_ok=True)
+    np.save(os.path.join(out_dir, "X.npy"), X.astype(np.float32))
+    np.save(os.path.join(out_dir, "demo.npy"), demo.astype(np.float32))
+    np.save(os.path.join(out_dir, "targets.npy"), y.astype(np.int64))
+    np.save(os.path.join(out_dir, "subject_ids.npy"), sid.astype(np.int64))
 
 
 def main() -> None:
@@ -73,38 +109,34 @@ def main() -> None:
     data = data.loc[(data.minute >= 0) & (data.minute <= 24 * 60)]
     data.loc[(data.variable == "Age") & (data.value > 200), "value"] = 91.4
 
-    # Full dataset: all ids that still have events after filtering.
-    sup_ts_ids = np.concatenate((train_ids, val_ids, test_ids))
-    curr_ids = data.ts_id.unique()
-    sup_ts_ids = sup_ts_ids[np.isin(sup_ts_ids, curr_ids)]
-    ts_id_to_ind = {ts_id: i for i, ts_id in enumerate(sup_ts_ids)}
-    data = data.loc[data.ts_id.isin(sup_ts_ids)].copy()
-    data["ts_ind"] = data["ts_id"].map(ts_id_to_ind)
-    N = len(sup_ts_ids)
+    # STraTS train+val become the train object; STraTS test is the fixed test.
+    all_ids_from_strats_split = np.concatenate((train_ids, val_ids, test_ids))
+    assert np.isin(all_ids_from_strats_split, data.ts_id.unique()).all()
+    ts_id_to_ind = {ts_id: i for i, ts_id in enumerate(all_ids_from_strats_split)}
+    data = data.loc[data.ts_id.isin(all_ids_from_strats_split)].copy()
 
-    oc = oc.loc[oc.ts_id.isin(sup_ts_ids)].copy()
+    data["ts_ind"] = data["ts_id"].map(ts_id_to_ind)
+    N = len(all_ids_from_strats_split) # Number of stays
+    is_test = np.isin(all_ids_from_strats_split, test_ids)  # per-stay, in ts_ind order
+
+    oc = oc.loc[oc.ts_id.isin(all_ids_from_strats_split)].copy()
     oc["ts_ind"] = oc["ts_id"].map(ts_id_to_ind)
     oc = oc.sort_values(by="ts_ind")
     y = np.array(oc["in_hospital_mortality"], dtype=np.int64)
-    # Patient id per stay (aligned to ts_ind order), used for patient-grouped
-    # train/val/test splitting downstream.
     subject_ids = np.array(oc["SUBJECT_ID"], dtype=np.int64)
     n_patients = int(np.unique(subject_ids).size)
     print(f"N = {N}, positive rate = {y.mean():.4f}, patients = {n_patients}")
 
-    # --- 2. static variables -> demo (N, 2) ---
-    static_ii = data.variable.isin(STATIC_VARIS)
-    static_data = data.loc[static_ii]
-    data = data.loc[~static_ii]
+    # --- 2. static variables -> demo (N, 2), RAW (z-norm applied per cohort) ---
+    static_mask = data.variable.isin(STATIC_VARIS)
+    static_data = data.loc[static_mask]
+    data = data.loc[~static_mask]
     static_var_to_ind = {v: i for i, v in enumerate(STATIC_VARIS)}
     D = len(STATIC_VARIS)
-    demo = np.zeros((N, D), dtype=np.float32)
+    demo_raw = np.zeros((N, D), dtype=np.float32)
+    # Turn dataframe into an array
     for row in static_data.itertuples():
-        demo[row.ts_ind, static_var_to_ind[row.variable]] = row.value
-    demo_means = demo.mean(axis=0, keepdims=True)
-    demo_stds = demo.std(axis=0, keepdims=True)
-    demo_stds = (demo_stds == 0) + (demo_stds > 0) * demo_stds
-    demo = ((demo - demo_means) / demo_stds).astype(np.float32)
+        demo_raw[row.ts_ind, static_var_to_ind[row.variable]] = row.value
 
     # --- 3. hourly binning ---
     variables = data.variable.unique()
@@ -114,15 +146,12 @@ def main() -> None:
     T = int(data.minute.max()) + 1
     print(f"V = {V} variables, T = {T} intervals")
 
-    # --- 4. dense values / obs ---
-    values = np.zeros((N, T, V), dtype=np.float32)
+    # --- 4. dense values / obs (RAW; fill+norm applied per cohort) ---
+    values_raw = np.zeros((N, T, V), dtype=np.float32)
     obs = np.zeros((N, T, V), dtype=np.float32)
-    ts_ind_arr = data["ts_ind"].to_numpy()
-    tstep_arr = data["minute"].to_numpy()
-    vind_arr = data["variable"].map(var_to_ind).to_numpy()
-    val_arr = data["value"].to_numpy(dtype=np.float32)
-    values[ts_ind_arr, tstep_arr, vind_arr] = val_arr
-    obs[ts_ind_arr, tstep_arr, vind_arr] = 1.0
+    values_raw[data["ts_ind"], data["minute"], data["variable"].map(var_to_ind)] = \
+        data["value"].to_numpy(dtype=np.float32) # from upstream last in hour always comes last
+    obs[data["ts_ind"], data["minute"], data["variable"].map(var_to_ind)] = 1.0
 
     # --- 5. delta: time (in bins) since last observation, normalised by T ---
     delta = np.zeros((N, T, V), dtype=np.float32)
@@ -131,43 +160,58 @@ def main() -> None:
         delta[:, t, :] = (1 - obs[:, t, :]) * (1 + delta[:, t - 1, :])
     delta = delta / T
 
-    # --- 6. mean-fill + z-normalise (full-data statistics) ---
-    obs_counts = obs.sum(axis=(0, 1))
-    obs_counts = np.maximum(obs_counts, 1)
-    means = (values * obs).sum(axis=(0, 1)) / obs_counts
-    values = values * obs + (1 - obs) * means.reshape((1, 1, V))
-    means = values.mean(axis=(0, 1), keepdims=True)
-    stds = values.std(axis=(0, 1), keepdims=True)
-    stds = (stds == 0) * 1 + (stds > 0) * stds
-    values = ((values - means) / stds).astype(np.float32)
+    # --- 6+7. per cohort: normalise on train, noem, save train/test ---
+    uniq_sid, counts = np.unique(subject_ids, return_counts=True)
+    single_pat = uniq_sid[counts == 1]
+    cohorts = {
+        "all": np.arange(N),
+        "single_stay": np.where(np.isin(subject_ids, single_pat))[0],
+    }
 
-    # --- 7. save ---
-    X = np.concatenate((values, obs, delta), axis=-1).astype(np.float32)
-    os.makedirs(args.out, exist_ok=True)
-    np.save(os.path.join(args.out, "X.npy"), X)
-    np.save(os.path.join(args.out, "demo.npy"), demo)
-    np.save(os.path.join(args.out, "targets.npy"), y)
-    np.save(os.path.join(args.out, "subject_ids.npy"), subject_ids)
+    meta_splits = {}
+    for cohort_name, cidx in cohorts.items():
+        c_labels, c_groups = y[cidx], subject_ids[cidx]
+        c_is_test = is_test[cidx]
+        rel_train = np.where(~c_is_test)[0]  # STraTS train+val
+        rel_test = np.where(c_is_test)[0]    # STraTS test
+
+        c_values, c_demo = normalise_cohort(
+            values_raw[cidx], obs[cidx], demo_raw[cidx], rel_train
+        )
+        c_X = np.concatenate((c_values, obs[cidx], delta[cidx]), axis=-1).astype(np.float32)
+
+        for split_name, rel in (("train", rel_train), ("test", rel_test)):
+            save_object(
+                os.path.join(args.out, cohort_name, split_name),
+                c_X[rel], c_demo[rel], c_labels[rel], c_groups[rel],
+            )
+        meta_splits[cohort_name] = {
+            "n_train": int(len(rel_train)),
+            "n_test": int(len(rel_test)),
+            "n_patients": int(np.unique(c_groups).size),
+            "train_pos_rate": float(c_labels[rel_train].mean()),
+            "test_pos_rate": float(c_labels[rel_test].mean()),
+        }
+        print(
+            f"[{cohort_name}] train {len(rel_train)} (pos {c_labels[rel_train].mean():.4f}) "
+            f"/ test {len(rel_test)} (pos {c_labels[rel_test].mean():.4f})"
+        )
+
     with open(os.path.join(args.out, "meta.json"), "w") as f:
         json.dump(
             {
-                "T": T,
-                "V": V,
-                "D": D,
-                "N": N,
-                "n_patients": n_patients,
+                "T": T, "V": V, "D": D, "N": N, "n_patients": n_patients,
                 "variables": list(map(str, variables)),
                 "static_varis": STATIC_VARIS,
                 "channel_layout": "concat([values, obs_mask, delta], axis=-1)",
                 "positive_rate": float(y.mean()),
+                "split_source": "strats (train+val vs test)",
+                "splits": meta_splits,
             },
             f,
             indent=2,
         )
-    print(
-        f"Saved X {X.shape}, demo {demo.shape}, targets {y.shape}, "
-        f"subject_ids {subject_ids.shape} ({n_patients} patients) -> {args.out}"
-    )
+    print(f"Saved 4 objects (all|single_stay x train|test) -> {args.out}")
 
 
 if __name__ == "__main__":

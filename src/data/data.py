@@ -41,6 +41,7 @@ class TorchVisionDM(BaseDataModule):
         val_size: Optional[int] = None,
         balanced_sampling: bool = False,
         balanced_test_val: bool = False,
+        single_stay_only: bool = False,  # unused here; only mimic3_sand (TimeSeriesDM) honors it
     ):
         super().__init__(
             val_split=val_split,

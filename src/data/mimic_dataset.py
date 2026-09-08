@@ -1,16 +1,26 @@
 """
 PyTorch Dataset for the MIMIC-III in-hospital-mortality task (SAND format).
 
-The data is produced by ``preprocess_mimic3_sand.py`` from the STraTS
-preprocessing pipeline (first 24h of each ICU stay, hourly-binned):
+Produced by ``preprocess_mimic3_sand.py`` (first 24h of each ICU stay,
+hourly-binned), which pre-splits the data into fixed train/test objects for two
+cohorts. Selected CIFAR-style via constructor args::
 
-  X.npy            (N, 24, 3V) float32 — concat([values, obs_mask, delta], -1)
-                                         with V = 129 time-series variables;
-                                         values are mean-filled + z-normalised
-  demo.npy         (N, 2)      float32 — z-normalised Age, Gender
-  targets.npy      (N,)        int64   — in-hospital mortality (~11% positive)
-  subject_ids.npy  (N,)        int64   — MIMIC-III SUBJECT_ID (patient id),
-                                         optional; used for patient-grouped splits
+    MIMIC3SandDataset(root, train=True,  single_stay_only=False)  # all, pool+val
+    MIMIC3SandDataset(root, train=False, single_stay_only=False)  # all, fixed test
+    MIMIC3SandDataset(root, train=True,  single_stay_only=True)   # single-stay, pool+val
+    ...
+
+On-disk layout under ``root`` (= ``$DATA_ROOT/mimic3_sand``)::
+
+    all/{train,test}/{X,demo,targets,subject_ids}.npy
+    single_stay/{train,test}/{X,demo,targets,subject_ids}.npy
+
+  X.npy            (n, 24, 3V) float32 — concat([values, obs_mask, delta], -1);
+                                         values mean-filled + z-normalised using
+                                         that cohort's TRAIN statistics
+  demo.npy         (n, 2)      float32 — z-normalised Age, Gender (train stats)
+  targets.npy      (n,)        int64   — in-hospital mortality (~11-12% positive)
+  subject_ids.npy  (n,)        int64   — MIMIC-III SUBJECT_ID (patient id)
 
 Each sample is returned as ``((ts, demo), label)``:
 
@@ -18,10 +28,9 @@ Each sample is returned as ``((ts, demo), label)``:
   demo  : (2,)     float32 — static features
   label : scalar int       — mortality (0 = survived, 1 = died)
 
-The class exposes a ``targets`` attribute (numpy int array) for stratified
-splitting, matching the P12/ECG5000 datasets, and a ``groups`` attribute
-(patient ids, or ``None`` if ``subject_ids.npy`` is absent) so TimeSeriesDM
-can keep all stays of a patient in the same train/val/test split.
+Exposes ``targets`` (numpy int array) and ``groups`` (patient ids) so
+TimeSeriesDM can carve a patient-grouped validation split from the train object.
+The test object is fixed across seeds -- the whole point of the pre-split.
 """
 
 from __future__ import annotations
@@ -34,30 +43,45 @@ from torch.utils.data import Dataset
 
 
 class MIMIC3SandDataset(Dataset):
-    """MIMIC-III mortality, dense hourly SAND format: ``((ts, demo), label)``."""
+    """MIMIC-III mortality, dense hourly SAND format: ``((ts, demo), label)``.
 
-    def __init__(self, root: str) -> None:
+    Args:
+        root: base directory (``$DATA_ROOT/mimic3_sand``).
+        train: ``True`` -> the train object (pool+val universe); ``False`` ->
+            the fixed test object.
+        single_stay_only: ``False`` -> ``all`` cohort (44,812 stays);
+            ``True`` -> ``single_stay`` cohort (26,609 stays, one per patient).
+    """
+
+    def __init__(
+        self, root: str, train: bool = True, single_stay_only: bool = False
+    ) -> None:
         super().__init__()
-        self._X = np.load(os.path.join(root, "X.npy"))
-        self._demo = np.load(os.path.join(root, "demo.npy"))
-        self.targets = np.load(os.path.join(root, "targets.npy")).astype(np.int64)
-        assert len(self._X) == len(self._demo) == len(self.targets)
-        self._labels = self.targets
+        cohort = "single_stay" if single_stay_only else "all"
+        split = "train" if train else "test"
+        obj_dir = os.path.join(root, cohort, split)
+        if not os.path.isdir(obj_dir):
+            raise FileNotFoundError(
+                f"MIMIC3Sand object not found: {obj_dir}. Regenerate with "
+                f"preprocess_mimic3_sand.py (it now writes "
+                f"{{all,single_stay}}/{{train,test}}/ objects)."
+            )
+        self.root = root
+        self.train = train
+        self.single_stay_only = single_stay_only
 
-        # Patient ids (SUBJECT_ID) per stay for patient-grouped splitting.
-        # Optional: older data dirs may not carry it.
-        groups_path = os.path.join(root, "subject_ids.npy")
-        if os.path.exists(groups_path):
-            self.groups = np.load(groups_path).astype(np.int64)
-            assert len(self.groups) == len(self.targets)
-        else:
-            self.groups = None
+        self._X = np.load(os.path.join(obj_dir, "X.npy"))
+        self._demo = np.load(os.path.join(obj_dir, "demo.npy"))
+        self.targets = np.load(os.path.join(obj_dir, "targets.npy")).astype(np.int64)
+        self.groups = np.load(os.path.join(obj_dir, "subject_ids.npy")).astype(np.int64)
+        assert len(self._X) == len(self._demo) == len(self.targets) == len(self.groups)
+        self._labels = self.targets
 
     def __len__(self) -> int:
         return len(self._X)
 
     def __getitem__(self, idx: int):
-        ts = torch.from_numpy(self._X[idx])      # (24, 3V)
+        ts = torch.from_numpy(self._X[idx])       # (24, 3V)
         demo = torch.from_numpy(self._demo[idx])  # (2,)
         label = int(self._labels[idx])
         return (ts, demo), label
