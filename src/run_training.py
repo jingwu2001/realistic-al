@@ -54,7 +54,7 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> BaseData
     if "single_stay_only" in cfg.data:
         single_stay_only = cfg.data.single_stay_only
 
-    time_series_datasets = {"ecg5000", "p12", "p12_transformer", "mimic3_sand"}
+    time_series_datasets = {"ecg5000", "p12", "p12_transformer", "mimic3_sand", "mimic3_los"}
     dm_cls = TimeSeriesDM if cfg.data.name in time_series_datasets else TorchVisionDM
 
     datamodule = dm_cls(

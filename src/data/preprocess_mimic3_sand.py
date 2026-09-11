@@ -5,7 +5,21 @@ pre-split into fixed train/test objects (CIFAR-style ``train=True/False``).
 Reads the pickle produced by STraTS' preprocess_mimic_iii_large.py
 (a 5-tuple: event dataframe, outcomes dataframe, train/val/test id arrays)
 and replicates the STraTS Dataset pipeline for model_type='sand'
-(dataset.py in the STraTS repo):
+(dataset.py in the STraTS repo). It also joins the ICU length-of-stay (LOS)
+label back from raw MIMIC-III (``ICUSTAYS.csv.gz``, keyed on ``ICUSTAY_ID`` =
+STraTS ``ts_id``), so each object carries *both* per-stay labels:
+
+  mortality.npy  in-hospital mortality (binary, the STraTS/SAND task)
+  los.npy        total ICU length of stay in days (float; for LOS prediction)
+
+The two labels live side by side in the same four objects; the dataset classes
+(``MIMIC3ICUDataset`` / ``MIMIC3LOSDataset`` in mimic_dataset.py) each read only
+the label they need. LOS is stored raw (days); binning into classes is a
+LOS-dataset concern (Harutyunyan's 10 buckets). Note the STraTS cohort is
+filtered to stays >= 24h, so LOS >= 1.0 day and the first bucket ([0,1)d) is
+empty.
+
+Pipeline steps (STraTS model_type='sand' branch):
 
   1. keep events in the first 24h (0 <= minute <= 1440); fix Age>200 -> 91.4
   2. split off static variables (Age, Gender) -> demo matrix (N, 2)
@@ -34,8 +48,8 @@ object only (train+val), not the test set -- the CIFAR convention (fixed
 constants from the training set), which also avoids test leakage.
 
 Output layout (written under <out>/):
-  all/train/{X,demo,targets,subject_ids}.npy
-  all/test/{X,demo,targets,subject_ids}.npy
+  all/train/{X,demo,mortality,los,subject_ids}.npy
+  all/test/{X,demo,mortality,los,subject_ids}.npy
   single_stay/train/{...}.npy
   single_stay/test/{...}.npy
   meta.json   (variable names, static names, T, V, per-cohort split sizes)
@@ -43,6 +57,7 @@ Output layout (written under <out>/):
 Usage:
   conda run -n real-al python src/data/preprocess_mimic3_sand.py \
       --strats-pkl /home/jing/Desktop/STraTS/data/processed/mimic_iii.pkl \
+      --icustays /mnt/physionet.org/files/mimiciii/1.4/ICUSTAYS.csv.gz \
       --out $DATA_ROOT/mimic3_sand
 """
 
@@ -54,8 +69,15 @@ import os
 import pickle
 
 import numpy as np
+import pandas as pd
 
 STATIC_VARIS = ["Age", "Gender"]
+
+# Harutyunyan et al. MIMIC-III benchmark length-of-stay buckets (days), kept
+# here purely as the canonical reference recorded in meta.json. los.npy stores
+# raw LOS in days; the ACTUAL binning happens in MIMIC3LOSDataset, which drops
+# the structurally-empty [0,1)d bin (cohort >= 24h) and uses 9 classes.
+LOS_BIN_EDGES = [1, 2, 3, 4, 5, 6, 7, 8, 14]
 
 
 def normalise_cohort(values_raw, obs, demo_raw, train_idx):
@@ -80,12 +102,18 @@ def normalise_cohort(values_raw, obs, demo_raw, train_idx):
     return values, demo
 
 
-def save_object(out_dir, X, demo, y, sid):
+def save_object(out_dir, X, demo, mortality, los, sid):
     os.makedirs(out_dir, exist_ok=True)
     np.save(os.path.join(out_dir, "X.npy"), X.astype(np.float32))
     np.save(os.path.join(out_dir, "demo.npy"), demo.astype(np.float32))
-    np.save(os.path.join(out_dir, "targets.npy"), y.astype(np.int64))
+    np.save(os.path.join(out_dir, "mortality.npy"), mortality.astype(np.int64))
+    np.save(os.path.join(out_dir, "los.npy"), los.astype(np.float32))
     np.save(os.path.join(out_dir, "subject_ids.npy"), sid.astype(np.int64))
+    # Remove the pre-LOS filename if this dir was written by an older run, so a
+    # stale mortality-only label can't be mistaken for the current one.
+    stale = os.path.join(out_dir, "targets.npy")
+    if os.path.exists(stale):
+        os.remove(stale)
 
 
 def main() -> None:
@@ -94,6 +122,11 @@ def main() -> None:
         "--strats-pkl",
         default="/home/jing/Desktop/STraTS/data/processed/mimic_iii.pkl",
         help="Path to STraTS-preprocessed mimic_iii.pkl",
+    )
+    parser.add_argument(
+        "--icustays",
+        default="/mnt/physionet.org/files/mimiciii/1.4/ICUSTAYS.csv.gz",
+        help="Path to raw MIMIC-III ICUSTAYS.csv.gz (source of the LOS label)",
     )
     parser.add_argument(
         "--out",
@@ -126,6 +159,21 @@ def main() -> None:
     subject_ids = np.array(oc["SUBJECT_ID"], dtype=np.int64)
     n_patients = int(np.unique(subject_ids).size)
     print(f"N = {N}, positive rate = {y.mean():.4f}, patients = {n_patients}")
+
+    # --- LOS label: total ICU length of stay (days) from raw MIMIC-III. ---
+    # ts_id == ICUSTAY_ID, so map each stay to ICUSTAYS.LOS in ts_ind order
+    # (all_ids_from_strats_split), the same ordering as y / subject_ids above.
+    print(f"Joining LOS from {args.icustays} ...")
+    icu = pd.read_csv(args.icustays, usecols=["ICUSTAY_ID", "LOS"])
+    los_map = dict(zip(icu.ICUSTAY_ID.to_numpy(), icu.LOS.to_numpy()))
+    missing = [int(t) for t in all_ids_from_strats_split if t not in los_map]
+    assert not missing, f"{len(missing)} ts_ids missing from ICUSTAYS LOS map"
+    los = np.array([los_map[t] for t in all_ids_from_strats_split], dtype=np.float32)
+    assert not np.isnan(los).any(), "NaN LOS values (missing OUTTIME?)"
+    print(
+        f"LOS days: min {los.min():.2f}, median {np.median(los):.2f}, "
+        f"max {los.max():.2f}"
+    )
 
     # --- 2. static variables -> demo (N, 2), RAW (z-norm applied per cohort) ---
     static_mask = data.variable.isin(STATIC_VARIS)
@@ -170,7 +218,7 @@ def main() -> None:
 
     meta_splits = {}
     for cohort_name, cidx in cohorts.items():
-        c_labels, c_groups = y[cidx], subject_ids[cidx]
+        c_labels, c_groups, c_los = y[cidx], subject_ids[cidx], los[cidx]
         c_is_test = is_test[cidx]
         rel_train = np.where(~c_is_test)[0]  # STraTS train+val
         rel_test = np.where(c_is_test)[0]    # STraTS test
@@ -183,7 +231,7 @@ def main() -> None:
         for split_name, rel in (("train", rel_train), ("test", rel_test)):
             save_object(
                 os.path.join(args.out, cohort_name, split_name),
-                c_X[rel], c_demo[rel], c_labels[rel], c_groups[rel],
+                c_X[rel], c_demo[rel], c_labels[rel], c_los[rel], c_groups[rel],
             )
         meta_splits[cohort_name] = {
             "n_train": int(len(rel_train)),
@@ -191,6 +239,8 @@ def main() -> None:
             "n_patients": int(np.unique(c_groups).size),
             "train_pos_rate": float(c_labels[rel_train].mean()),
             "test_pos_rate": float(c_labels[rel_test].mean()),
+            "train_los_median": float(np.median(c_los[rel_train])),
+            "test_los_median": float(np.median(c_los[rel_test])),
         }
         print(
             f"[{cohort_name}] train {len(rel_train)} (pos {c_labels[rel_train].mean():.4f}) "
@@ -205,6 +255,9 @@ def main() -> None:
                 "static_varis": STATIC_VARIS,
                 "channel_layout": "concat([values, obs_mask, delta], axis=-1)",
                 "positive_rate": float(y.mean()),
+                "los_unit": "days",
+                "los_bin_edges": LOS_BIN_EDGES,
+                "los_num_classes": len(LOS_BIN_EDGES) + 1,
                 "split_source": "strats (train+val vs test)",
                 "splits": meta_splits,
             },

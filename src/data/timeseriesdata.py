@@ -6,7 +6,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from data.ecg5000_dataset import ECG5000Dataset
-from data.mimic_dataset import MIMIC3SandDataset
+from data.mimic_dataset import MIMIC3ICUDataset, MIMIC3LOSDataset
 from data.p12_dataset import P12Dataset, P12TransformerDataset
 
 from .active import ActiveLearningDataset
@@ -96,7 +96,9 @@ class TimeSeriesDM(BaseDataModule):
         elif self.dataset == "p12_transformer":
             self.dataset_cls = P12TransformerDataset
         elif self.dataset == "mimic3_sand":
-            self.dataset_cls = MIMIC3SandDataset
+            self.dataset_cls = MIMIC3ICUDataset
+        elif self.dataset == "mimic3_los":
+            self.dataset_cls = MIMIC3LOSDataset
         else:
             raise NotImplementedError
         self._setup_datasets()
@@ -281,6 +283,53 @@ class TimeSeriesDM(BaseDataModule):
 
         return np.sort(to_idx(sel)), np.sort(to_idx(pool_groups))
 
+    def _grouped_val_pool_split_multiclass(self, labels, groups, val_size):
+        """Multiclass counterpart of ``_grouped_val_pool_split`` for the LOS task.
+
+        The binary version buckets groups into pos/neg (label 0/1) and would drop
+        any group whose label is >= 2, so it cannot be used for a multiclass
+        target. This version carves a patient-grouped, class-stratified
+        validation set (~``val_size`` samples) from the train object, with the
+        remainder as the labelled pool. Every group is placed in exactly one of
+        val/pool, so no sample is ever dropped. Grouping keeps all of a patient's
+        stays on the same side (matters only for the ``all`` cohort; the
+        single-stay cohort is all singletons). Seeded by ``self.seed``.
+        """
+        labels = np.asarray(labels)
+        groups = np.asarray(groups)
+        rng = np.random.default_rng(self.seed)
+
+        order = np.argsort(groups, kind="stable")
+        _, start = np.unique(groups[order], return_index=True)
+        member_lists = np.split(order, start[1:])
+        # One representative label per group (max LOS bin) for stratification;
+        # multi-stay patients (all cohort) follow their max-bin stratum as a unit.
+        group_label = np.array([int(labels[m].max()) for m in member_lists])
+        group_size = np.array([len(m) for m in member_lists])
+
+        n_total = len(labels)
+        val_frac = val_size / n_total
+        sel = []
+        for c in np.unique(group_label):
+            gs = np.where(group_label == c)[0]
+            rng.shuffle(gs)
+            target = max(1, round(val_frac * int(group_size[gs].sum())))
+            got = 0
+            for gi in gs:
+                if got >= target:
+                    break
+                sel.append(int(gi))
+                got += int(group_size[gi])
+        sel_set = set(sel)
+        pool_groups = [g for g in range(len(member_lists)) if g not in sel_set]
+        assert pool_groups, f"no groups left for the pool (val_size={val_size})"
+
+        def to_idx(s):
+            return (np.concatenate([member_lists[g] for g in s])
+                    if s else np.array([], dtype=int))
+
+        return np.sort(to_idx(sel)), np.sort(to_idx(pool_groups))
+
     def _balanced_indices(self, labels):
         """Indices of a class-balanced subset (equal per class, majority
         downsampled), used to build balanced eval sets from a fixed test/val
@@ -331,17 +380,27 @@ class TimeSeriesDM(BaseDataModule):
         # so the test cohort is identical across seeds. We only carve the      #
         # validation set from the train object, per seed.                      #
         # ------------------------------------------------------------------ #
-        if self.dataset == "mimic3_sand":
+        if self.dataset in ("mimic3_sand", "mimic3_los"):
+            # Both tasks share the same on-disk objects (built by
+            # preprocess_mimic3_sand.py); only the label differs, which is
+            # handled by self.dataset_cls (MIMIC3ICUDataset / MIMIC3LOSDataset).
             _root = os.path.join(self.data_root, "mimic3_sand")
 
             _train_obj = self.dataset_cls(_root, train=True, single_stay_only=self.single_stay_only)
             _n_train_obj = len(_train_obj.targets)
             _val_size = (self.val_split if isinstance(self.val_split, int)
                          else max(1, round(self.val_split * _n_train_obj)))
-            _val_idx, _pool_idx = self._grouped_val_pool_split(
-                _train_obj.targets, _train_obj.groups, _val_size,
-                balanced_eval=self.balanced_test_val,
-            )
+            if self.dataset == "mimic3_los":
+                # multiclass (9-class LOS): the binary pos/neg split would drop
+                # any patient whose LOS bin is >= 2.
+                _val_idx, _pool_idx = self._grouped_val_pool_split_multiclass(
+                    _train_obj.targets, _train_obj.groups, _val_size,
+                )
+            else:
+                _val_idx, _pool_idx = self._grouped_val_pool_split(
+                    _train_obj.targets, _train_obj.groups, _val_size,
+                    balanced_eval=self.balanced_test_val,
+                )
 
             # train (labelled pool universe)
             self.train_set = ActiveSubset(

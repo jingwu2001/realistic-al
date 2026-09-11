@@ -1,0 +1,15 @@
+name: mimic3_los
+shape: [24, 387]
+num_classes: 9   # ICU length-of-stay: Harutyunyan's 10 buckets minus the empty
+                 # [0,1)d bin (cohort >= 24h); see MIMIC3LOSDataset. Headline
+                 # metric val/test kappa (linear-weighted Cohen's).
+val_split: 0.1
+mean: [0.0]
+std: [1.0]
+transform_train: basic
+transform_test: basic
+balanced_sampling: false
+balanced_test_val: false
+# true -> keep only patients with exactly one ICU stay (runtime filter; drops
+# multi-stay patients entirely). Needs subject_ids.
+single_stay_only: false

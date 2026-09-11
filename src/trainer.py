@@ -61,6 +61,11 @@ class ActiveTrainingLoop(object):
             if self.cfg.data.name == "isic2016":
                 monitor = "val/auroc"
                 mode = "max"
+            elif self.cfg.data.name == "mimic3_los":
+                # length-of-stay: ordinal 9-class task, selected on the headline
+                # linear-weighted Cohen's kappa (robust to class imbalance).
+                monitor = "val/kappa"
+                mode = "max"
             elif self.cfg.data.name in ("p12", "p12_transformer", "mimic3_sand"):
                 monitor = "val/auroc"
                 mode = "max"
@@ -93,7 +98,7 @@ class ActiveTrainingLoop(object):
             callbacks.append(pl.callbacks.EarlyStopping("val/acc", mode="max"))
         if self.cfg.data.name == "isic2016":
             callbacks.append(ISIC2016MetricCallback())
-        if self.cfg.data.name in ["isic2019", "miotcd", "ecg5000", "p12", "p12_transformer", "mimic3_sand"]:
+        if self.cfg.data.name in ["isic2019", "miotcd", "ecg5000", "p12", "p12_transformer", "mimic3_sand", "mimic3_los"]:
             callbacks.append(
                 ImbClassMetricCallback(num_classes=self.cfg.data.num_classes)
             )

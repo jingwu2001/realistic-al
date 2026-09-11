@@ -20,7 +20,7 @@ Stochastic head (same pattern as ResNet / GRU-D / transformers):
   ConsistentMCDropout(dropout_p)
   Linear(hid_dim * M + hid_dim -> n_classes)
 
-Input format expected from the dataloader (MIMIC3SandDataset):
+Input format expected from the dataloader (MIMIC3ICUDataset / MIMIC3LOSDataset):
   x = (ts, demo)
     ts   : (B, T, 3V) float32 — concat([values, obs_mask, delta], -1)
     demo : (B, D)     float32 — normalised static features

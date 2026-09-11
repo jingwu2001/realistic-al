@@ -6,6 +6,34 @@ from pytorch_lightning import Callback
 from torchmetrics import AUROC, AveragePrecision, ConfusionMatrix
 
 
+def weighted_cohen_kappa(conf_mat: torch.Tensor, weights: str = "linear") -> torch.Tensor:
+    """Weighted Cohen's kappa computed directly from a KxK confusion matrix.
+
+    ``weights='linear'`` uses |i-j|/(K-1) penalties (the convention used by the
+    MIMIC-III benchmark LOS task); ``'quadratic'`` uses ((i-j)/(K-1))**2.
+    Robust to empty rows/columns: a class with no support contributes no mass to
+    the observed/expected agreement, so it cannot produce NaN as long as at least
+    two classes carry mass. Returns NaN only for a degenerate (single-class or
+    empty) matrix.
+    """
+    C = conf_mat.float()
+    N = C.sum()
+    K = C.shape[0]
+    if N == 0 or K < 2:
+        return torch.tensor(float("nan"))
+    O = C / N                              # observed agreement
+    row = O.sum(dim=1, keepdim=True)       # (K, 1)
+    col = O.sum(dim=0, keepdim=True)       # (1, K)
+    E = row * col                          # expected agreement under independence
+    idx = torch.arange(K, dtype=torch.float, device=C.device)
+    diff = torch.abs(idx[:, None] - idx[None, :]) / (K - 1)
+    W = diff ** 2 if weights == "quadratic" else diff
+    denom = (W * E).sum()
+    if denom == 0:
+        return torch.tensor(float("nan"))
+    return 1.0 - (W * O).sum() / denom
+
+
 class MetricCallback(Callback):
     """Class for using using multiple different metrics including automated resets.
     IMPLEMENTATION: add additional metrics here."""
@@ -162,6 +190,11 @@ class ImbClassMetricCallback(MetricCallback):
             f"{mode}/w_acc": w_acc,
             f"{mode}/av_prec": av_prec,
             f"{mode}/av_f1": av_f1,
+            # Linear-weighted Cohen's kappa (ordinal agreement), the headline
+            # metric for the length-of-stay task; matches Harutyunyan et al.'s
+            # cohen_kappa_score(..., weights='linear'). Purely a function of the
+            # confusion matrix, so it costs nothing extra to log for every task.
+            f"{mode}/kappa": weighted_cohen_kappa(conf_mat, weights="linear"),
         }
         if class_wise:
             class_wise_dict = {
