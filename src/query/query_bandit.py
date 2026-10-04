@@ -25,10 +25,23 @@ def _class_distribution_entropy(labels: np.ndarray, num_classes: int) -> float:
     ent = -np.sum(p_nonzero * np.log(p_nonzero))
     return float(ent / np.log(num_classes))
 
-def set_dropout_p(model: nn.Module, p: float):
-    for module in model.modules():
-        if isinstance(module, ConsistentMCDropout):
-            module.p = p
+def _get_query_state(model: nn.Module, device):
+    """Everything a query can change that later rounds depend on: the global
+    RNGs (the next round's weight init, sampler and augmentation seeds draw from
+    them) and the ConsistentMCDropout masks (reused by the post-query val/test
+    evaluation; rebuilding a mask draws from the CUDA RNG)."""
+    masks = [
+        (module, module.p, module._mask)
+        for module in model.modules()
+        if isinstance(module, ConsistentMCDropout)
+    ]
+    return _get_rng_states(device), masks
+
+def _set_query_state(device, state):
+    rng_states, masks = state
+    _set_rng_states(device, rng_states)
+    for module, p, mask in masks:
+        module.p, module._mask = p, mask
 
 def _get_rng_states(device):
     import random
@@ -78,15 +91,17 @@ class BanditQuerySampler(QuerySampler):
         device = self.device
         acq_size = self.acq_size
 
-        original_p = cfg.model.dropout_p
-
-        before_state = _get_rng_states(device)
+        # state_before -> BALD arm -> state_after_bald -> (context features)
+        # -> back to state_before -> vendi arm -> state_after_vendi -> (context)
+        # -> choose an arm and restore the state after that arm, so a bandit that
+        # keeps picking one arm reproduces that method's run exactly. "State"
+        # includes the MC-dropout masks: the gradient embedding turns dropout off
+        # and back on inside the vendi arm (disable_mc_dropout), clearing them.
+        state_before = _get_query_state(model, device)
 
         # ------------------------------------------------------------------ #
-        # 1. BALD scores over the pool (with dropout enabled)                 #
+        # 1. Uncertainty arm == query=bald                                   #
         # ------------------------------------------------------------------ #
-        set_dropout_p(model, original_p)
-
         bald_fct = query_uncertainty._get_bald_fct(model)
 
         def _return_all(scores, size):
@@ -101,15 +116,16 @@ class BanditQuerySampler(QuerySampler):
         )
         assert len(bald_scores_pool.shape) == 1
 
-        # Q_u  — top-k by BALD (uncertainty arm)
-        sorted_bald = np.argsort(bald_scores_pool)[::-1].copy()   # .copy() → positive strides
-        acq_indices_bald = sorted_bald[:acq_size]           # pool indices
+        # Q_u  — top-k by BALD (uncertainty arm), same ranking as query=bald
+        acq_indices_bald = np.argsort(bald_scores_pool)[::-1][:acq_size].copy()   # .copy() → positive strides
         acq_vals_bald    = bald_scores_pool[acq_indices_bald]
 
-        mean_bald_Q_u = bald_scores_pool[acq_indices_bald].mean()   # FIX: was using leftout
-        mean_bald_Q_d_placeholder = None   # filled below after Vendi selects Q_d
+        state_after_bald = _get_query_state(model, device)
 
-        # BALD scores over the labeled set (baseline reference)
+        mean_bald_Q_u = float(acq_vals_bald.mean())
+
+        # BALD scores over the labeled set (baseline reference), with the same
+        # MC-dropout masks as the pool pass
         bald_scores_L, _ = query_uncertainty.query_sampler(
             labeled_loader,
             acq_function=bald_fct,
@@ -119,30 +135,22 @@ class BanditQuerySampler(QuerySampler):
         )
         mean_bald_L = float(bald_scores_L.mean())
 
-        bald_state = _get_rng_states(device)
-        _set_rng_states(device, before_state)
-
         # ------------------------------------------------------------------ #
-        # 2. Vendi scores / embeddings (dropout disabled)                     #
+        # 2. Diversity arm == query=vendi / gvendi, or vendi-q2              #
         # ------------------------------------------------------------------ #
-        set_dropout_p(model, 0.0)
+        _set_query_state(device, state_before)
 
-        normalization = cfg.query.vendi.normalization
-        # features by default; BADGE-style last-layer gradients when
-        # cfg.query.vendi.use_grad is true (same switch as vendi/gvendi)
-        feat_labeled, feat_unlabeled, _ = query_diversity.get_vendi_embeddings(
-            cfg.query.vendi, model, labeled_loader, pool_loader
+        vendi_query = query_diversity._get_vendi_q2 if _use_vendi_q2(cfg) else query_diversity._get_vendi
+        embeddings = {}  # the arm's normalized embeddings, reused for the context
+        acq_indices_vendi, acq_vals_vendi, _ = vendi_query(
+            cfg, model, labeled_loader, pool_loader,
+            acq_size=acq_size, embeddings_out=embeddings,
         )
-        feat_labeled, feat_unlabeled = query_diversity.normalize_features(
-            feat_labeled, feat_unlabeled, normalization
-        )
+        acq_indices_vendi = np.ascontiguousarray(acq_indices_vendi)
 
-        vendi_scores_pool, _ = query_diversity.vendi_from_features(cfg.query.vendi, feat_labeled, feat_unlabeled)
+        state_after_vendi = _get_query_state(model, device)
 
-        # Q_d  — top-k by Vendi (diversity arm)
-        sorted_vendi      = np.argsort(vendi_scores_pool)[::-1].copy()
-        acq_indices_vendi = sorted_vendi[:acq_size]            # pool indices
-        acq_vals_vendi    = vendi_scores_pool[acq_indices_vendi]
+        feat_labeled, feat_unlabeled = embeddings["labeled"], embeddings["unlabeled"]
 
         # Features for Vendi arm: vendi(L + Q_u), vendi(L + Q_d), vendi(L)
         feat_Q_u   = feat_unlabeled[acq_indices_bald]
@@ -161,10 +169,6 @@ class BanditQuerySampler(QuerySampler):
 
         # Now we can compute mean_bald(Q_d): BALD scores of the diversity-selected samples
         mean_bald_Q_d = float(bald_scores_pool[acq_indices_vendi].mean())
-
-        vendi_state = _get_rng_states(device)
-
-        set_dropout_p(model, original_p)
 
         # ------------------------------------------------------------------ #
         # 3. Class distribution entropy                                       #
@@ -204,16 +208,21 @@ class BanditQuerySampler(QuerySampler):
         context_features = np.stack([features_bald, features_vendi])  # (2, 6)
 
         # ------------------------------------------------------------------ #
-        # 5. Select arm and restore RNG to the end-state of the chosen method #
+        # 5. Select arm and restore the end state of the chosen method       #
         # ------------------------------------------------------------------ #
         selected_arm = self.bandit_manager.select_arm(context_features)
 
         if selected_arm == 0:  # BALD / uncertainty
-            _set_rng_states(device, bald_state)
+            _set_query_state(device, state_after_bald)
             return acq_indices_bald, acq_vals_bald, {"bandit_arm": 0}
         else:                  # Vendi / diversity
-            _set_rng_states(device, vendi_state)
+            _set_query_state(device, state_after_vendi)
             return acq_indices_vendi, acq_vals_vendi, {"bandit_arm": 1}
+
+
+def _use_vendi_q2(cfg) -> bool:
+    """query.bandit.use_vendi_q2: diversity arm runs vendi-q2 instead of vendi."""
+    return bool(cfg.query.bandit.get("use_vendi_q2", False))
 
 
 def calculate_vendi_score(cfg, gamma, feats):
@@ -222,6 +231,14 @@ def calculate_vendi_score(cfg, gamma, feats):
     """
     vendi_cfg = cfg.query.vendi
     q, kernel = vendi_cfg.q, vendi_cfg.kernel
+
+    if _use_vendi_q2(cfg):
+        # closed-form VS_2 = tr(K)^2 / ||K||_F^2, no eigensolve; float64 before
+        # the kernel, matching query_diversity.vendi_q2_from_features
+        feats = feats.to(torch.float64)
+        K = query_diversity.compute_kernel_matrix(kernel, gamma, feats, feats)
+        K = torch.as_tensor(K, dtype=torch.float64)
+        return float(torch.diagonal(K).sum() ** 2 / (K ** 2).sum().clamp(min=1e-12))
 
     # Kernel matrix — shared implementations (rbf/cosine/linear)
     K = query_diversity.compute_kernel_matrix(kernel, gamma, feats, feats)
@@ -304,15 +321,13 @@ if __name__ == "__main__":
         mock_unc.query_sampler.return_value = (np.random.rand(20), None)
         mock_unc._get_bald_fct.return_value = lambda x: x
 
-        # Mock the embedding helper for Vendi: (emb_labeled, emb_unlabeled, grad_norms)
-        mock_div.get_vendi_embeddings.return_value = (torch.randn(20, 10), torch.randn(20, 10), None)
-        
-        # Mock normalize_features
-        mock_div.normalize_features.return_value = (torch.randn(20, 10), torch.randn(20, 10))
+        # Mock the diversity arm (_get_vendi): fills the normalized embeddings
+        # and returns (acq_indices, scores, extra_info)
+        def fake_get_vendi(cfg, model, labeled_loader, pool_loader, acq_size, embeddings_out):
+            embeddings_out["labeled"], embeddings_out["unlabeled"] = torch.randn(20, 10), torch.randn(20, 10)
+            return np.arange(acq_size), np.random.rand(acq_size), {}
+        mock_div._get_vendi.side_effect = fake_get_vendi
 
-        # Mock vendi_from_features return (scores, eig_time)
-        mock_div.vendi_from_features.return_value = (np.random.rand(20), 0.0)
-        
         # Mock the kernel matrix and renyi_entropy for calculate_vendi_score
         # (calculate_vendi_score uses query_diversity.compute_kernel_matrix)
         mock_div.compute_kernel_matrix.return_value = torch.randn(5, 5)

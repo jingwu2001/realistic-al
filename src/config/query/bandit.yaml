@@ -10,3 +10,9 @@ bandit:
     unc: ["mean_bald_Q_u", "mean_bald_Q_d", "mean_bald_L", "cls_dist", "t", "bias"]
     div: ["vendi_Q_u_L",   "vendi_Q_d_L",   "vendi_L",    "cls_dist", "t", "bias"]
   normalize_features: true
+  # true: the diversity arm runs vendi-q2 instead of vendi — closed-form Renyi
+  # q=2 Vendi score (no eigendecomposition), both for picking Q_d and for the
+  # vendi(L), vendi(L+Q_u), vendi(L+Q_d) context features. vendi-q2.yaml only
+  # differs from vendi.yaml by q=2, so main.py pins query.vendi.q=2.0; all other
+  # query.vendi.* settings still apply (kernel must be rbf or cosine).
+  use_vendi_q2: false

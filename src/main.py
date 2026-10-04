@@ -44,6 +44,15 @@ def main(cfg: DictConfig):
         bandit_context_dim = bandit_config.context_dim if "bandit" in cfg.query and "context_dim" in bandit_config else 4
         bandit_manager = BanditManager(context_dim=bandit_context_dim, alpha=bandit_alpha)
 
+        if bandit_config.get("use_vendi_q2", False):
+            # diversity arm = vendi-q2 (closed form, see query_bandit.py). Pin
+            # q=2 before init_wandb so the logged config and run name match,
+            # and reject linear up front instead of after the first training round.
+            if cfg.query.vendi.kernel == "linear":
+                raise ValueError("query.bandit.use_vendi_q2 needs a unit-diagonal kernel (rbf/cosine), got linear")
+            logger.info(f"use_vendi_q2: diversity arm uses vendi-q2 (query.vendi.q {cfg.query.vendi.q} -> 2.0)")
+            cfg.query.vendi.q = 2.0
+
     if cfg.trainer.dry_run:
         logger.info("dry_run=True: skipping wandb init and training")
 

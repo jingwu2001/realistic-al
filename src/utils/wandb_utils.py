@@ -105,12 +105,16 @@ def _bandit_variant(cfg: DictConfig):
     Bandit selects among diversity contexts built on the vendi kernel, so it
     carries the same ``emb/kernel/norm/q`` tags as vendi (when the inherited
     ``vendi`` block is present), plus the bandit-specific ``alpha`` (LinUCB
-    exploration) and ``context_dim``. e.g. ``bandit-feat-rbf-minmax-q1.0-a1.0-c6``.
+    exploration) and ``context_dim``. e.g. ``bandit-feat-rbf-minmax-q1.0-a1.0-c6``,
+    or ``bandit-vq2-feat-...-q2.0-...`` when the diversity arm runs vendi-q2.
     """
     b = cfg.query.bandit
 
     tag = "bandit"
     hp = {}
+    if b.get("use_vendi_q2", False):
+        tag += "-vq2"
+        hp["div"] = "vendi-q2"
 
     v = cfg.query.get("vendi", None)
     if v is not None:
