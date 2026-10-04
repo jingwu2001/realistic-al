@@ -17,8 +17,19 @@ from .kcenterGreedy import KCenterGreedy
 # helpers defined below). It is imported lazily in the dispatch branch instead.
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from models.bayesian_module import BayesianModule
+from models.bayesian_module import BayesianModule, ConsistentMCDropout
 from utils.timer import Timer
+
+# vendi-approx submodule's src holds vendi_from_features_secular (the secular
+# fast-path scorer). Put it on sys.path so _get_vendi can lazily import it when
+# query.vendi.secular is set. Import is done lazily (not here) because that
+# wrapper imports the kernel/gamma helpers back from THIS module — a top-level
+# import would hit the same partial-init cycle as `.vendi` (see note above) —
+# and because it loads the C library (vendi-approx/c/libvendi.so), a dependency
+# kept optional this way.
+sys.path.append(
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "vendi-approx", "src"))
+)
 
 
 NAMES = ["kcentergreedy", "badge", "vendi", "gvendi", "vendi-q2", "vendi-q2-sequential"]
@@ -405,6 +416,11 @@ def _boundary_tie_stats(
     acquired ranking-key value, it was excluded from the batch purely by the
     tie-break rather than by being genuinely less diverse.
 
+    This happens e.g. when many pool candidates are kernel-orthogonal to the
+    whole labeled set (k(u, l) underflows to ~0): they all score exactly
+    VS(K_LL (+) [1]), and a solver change (dense vs secular, GPU vs CPU) picks a
+    different subset of them.
+
     Args:
         rank_scores: (U,) ranking keys over the whole pool (higher = acquired).
         acq_indices: (acq_size,) pool indices actually acquired.
@@ -412,15 +428,19 @@ def _boundary_tie_stats(
         rtol, atol: tolerance passed to np.isclose (near-duplicates count as ties).
 
     Returns:
-        dict with the boundary value, how many pool samples tie it, and how many
-        of those tied samples were acquired vs excluded. n_tied_excluded > 0 means
-        the batch boundary is ambiguous (samples dropped only by luck).
+        dict with the boundary value, the gap to the best unacquired sample
+        (sorted[B-1] - sorted[B]; 0 = exact tie at the cutoff) and that gap
+        relative to |boundary value|, how many pool samples tie the boundary,
+        and how many of those were acquired vs excluded. n_tied_excluded > 0
+        means the batch boundary is ambiguous (samples dropped only by luck).
     """
     n = len(rank_scores)
     if acq_size <= 0 or acq_size >= n:
         # nothing acquired, or the whole pool acquired -> no boundary exists
         return {
             "boundary_value": None,
+            "gap": None,
+            "rel_gap": None,
             "n_tied": 0,
             "n_tied_acquired": 0,
             "n_tied_excluded": 0,
@@ -432,10 +452,19 @@ def _boundary_tie_stats(
     acq_mask = np.zeros(n, dtype=bool)
     acq_mask[acq_indices] = True
 
+    # margin by which the batch beats the best candidate left out. Relative to
+    # the boundary magnitude so it is comparable across kernels (VS ranges from
+    # ~1 in the all-ones regime to ~L+1 in the identity regime); rel_gap near
+    # float64 solver noise (<~1e-12) is a tie in all but name.
+    gap = boundary - float(rank_scores[~acq_mask].max())
+    rel_gap = gap / max(abs(boundary), 1e-300)
+
     n_tied = int(tied_mask.sum())
     n_tied_acquired = int((tied_mask & acq_mask).sum())
     return {
         "boundary_value": boundary,
+        "gap": gap,
+        "rel_gap": rel_gap,
         "n_tied": n_tied,
         "n_tied_acquired": n_tied_acquired,
         "n_tied_excluded": n_tied - n_tied_acquired,
@@ -448,12 +477,14 @@ def _get_vendi_q2(
     labeled_dataloader: DataLoader,
     pool_loader: DataLoader,
     acq_size: int = 128,
+    embeddings_out: Optional[dict] = None,
     ):
     """Vendi score special case with q=2.
     Eliminates the need of calculating eigenvalues (see vendi_q2_from_features).
 
     Same acquisition contract as _get_vendi: returns
         (acq_indices, sorted_scores[:acq_size], extra_info_dict).
+    embeddings_out: see _get_vendi.
     """
     vendi_cfg = cfg.query.vendi
 
@@ -467,11 +498,14 @@ def _get_vendi_q2(
     # emb_labeled: (num_labeled, emb_dim)
     # emb_unlabeled: (num_unlabeled, emb_dim)
 
+    kernel_diag = {}
     rank_scores, true_scores = vendi_q2_from_features(
-        vendi_cfg, emb_labeled, emb_unlabeled
+        vendi_cfg, emb_labeled, emb_unlabeled, diagnostics=kernel_diag
     )
     # rank_scores / true_scores: (num_unlabeled,)
 
+    if embeddings_out is not None:
+        embeddings_out["labeled"], embeddings_out["unlabeled"] = emb_labeled, emb_unlabeled
     del emb_labeled, emb_unlabeled
     torch.cuda.empty_cache()
 
@@ -483,6 +517,7 @@ def _get_vendi_q2(
 
     extra_info_dict = calculate_extra_info(acq_size, sorted_scores)
     extra_info_dict["eig_time_s"] = 0.0  # no eigensolve on the q=2 path
+    extra_info_dict.update(kernel_diag)  # labeled-Gram health -> al/query/kernel_*
 
     # ranking key in acquisition (descending) order — the first acq_size entries
     # are exactly the acquired batch, so the boundary sits at index acq_size.
@@ -517,8 +552,11 @@ def _get_vendi_q2(
     return acq_indices, sorted_scores[:acq_size], extra_info_dict
 
 
-def vendi_q2_from_features(vendi_cfg, feat_labeled, feat_unlabeled):
+def vendi_q2_from_features(vendi_cfg, feat_labeled, feat_unlabeled, diagnostics=None):
     """Calculates the Vendi score with Renyi q=2 from the labeled and unlabeled features
+
+    diagnostics: optional mutable dict filled in-place with kernel_diagnostics(...)
+        (labeled-Gram health, resolved gamma); omit for no behavior change.
     """
     if vendi_cfg.kernel == 'linear':
         raise ValueError("Unsupported kernel: linear")
@@ -551,6 +589,8 @@ def vendi_q2_from_features(vendi_cfg, feat_labeled, feat_unlabeled):
     K_LL = compute_kernel_matrix(vendi_cfg.kernel, gamma, feat_labeled, feat_labeled)
     K_LL = torch.as_tensor(K_LL, dtype=torch.float64, device=DEVICE)
     assert torch.isfinite(K_LL).all(), "non-finite entries in K_LL"
+    if diagnostics is not None:
+        diagnostics.update(kernel_diagnostics(vendi_cfg.kernel, gamma, K_LL))
 
     diag_U = kernel_self_similarity(vendi_cfg.kernel, feat_unlabeled)
     diag_U = torch.as_tensor(diag_U, dtype=torch.float64, device=DEVICE)
@@ -576,6 +616,7 @@ def _get_vendi(
     labeled_dataloader: DataLoader,
     pool_loader: DataLoader,
     acq_size: int = 128,
+    embeddings_out: Optional[dict] = None,
 ):
     """Vendi-score acquisition on feature embeddings, or on BADGE-style
     last-layer gradient embeddings when cfg.query.vendi.use_grad is true
@@ -584,6 +625,10 @@ def _get_vendi(
     NOTE: no @torch.no_grad() decorator — the gradient path needs autograd for
     the classifier gradients; both embedding helpers return detached tensors
     and the feature path is no_grad internally.
+
+    embeddings_out: optional dict; if given, filled with the normalized
+        "labeled"/"unlabeled" embeddings the scores were computed on (the
+        bandit reuses them for its context features instead of recomputing).
 
     Returns:
         acq_indices: (acq_size,) pool indices sorted by descending score
@@ -602,9 +647,21 @@ def _get_vendi(
     # emb_labeled: (num_labeled, emb_dim)
     # emb_unlabeled: (num_unlabeled, emb_dim)
 
-    scores, eig_time = vendi_from_features(vendi_cfg, emb_labeled, emb_unlabeled)
+    kernel_diag = {}
+    if vendi_cfg.get("secular", False):
+        # lazy import (see the note by the sys.path.append at the top): avoids the
+        # partial-init cycle and keeps the C secular library an optional dependency.
+        from vendi_from_features_secular import vendi_from_features_secular
+        vendi_f = vendi_from_features_secular
+    else:
+        vendi_f = vendi_from_features
+    scores, eig_time = vendi_f(
+        vendi_cfg, emb_labeled, emb_unlabeled, diagnostics=kernel_diag
+    )
     # scores: (num_unlabeled,)
 
+    if embeddings_out is not None:
+        embeddings_out["labeled"], embeddings_out["unlabeled"] = emb_labeled, emb_unlabeled
     del emb_labeled, emb_unlabeled
     torch.cuda.empty_cache()
 
@@ -615,6 +672,13 @@ def _get_vendi(
 
     extra_info_dict = calculate_extra_info(acq_size, sorted_scores)
     extra_info_dict["eig_time_s"] = round(eig_time, 4)
+    extra_info_dict.update(kernel_diag)  # labeled-Gram health -> al/query/kernel_*
+
+    # Gap/ties at the top-B cutoff (-> al/query/boundary_*); see _get_vendi_q2.
+    # A zero gap means the batch is partly chosen by argsort's tie-break.
+    extra_info_dict["boundary_ties"] = _boundary_tie_stats(
+        scores, acq_indices, acq_size
+    )
 
     if grad_norms is not None:
         # Raw-gradient-norm diagnostics in the same [max, min, median] acq/else
@@ -796,13 +860,71 @@ def resolve_gamma(gamma: Union[float, str], feats: torch.Tensor) -> float:
     raise ValueError(f"Unsupported gamma: {gamma}")
 
 
-def vendi_from_features(vendi_cfg, feat_labeled, feat_unlabeled):
+def kernel_diagnostics(kernel: str, gamma, K_LL) -> dict:
+    """Cheap per-round health check on the labeled Gram matrix K_LL, to detect a
+    kernel that has collapsed to a degenerate regime where the Vendi score can no
+    longer discriminate candidates:
+
+      * all-ones  (rbf argument ~0 / gamma too small): K -> 11^T, rank 1,
+        effective rank -> 1 -- every point looks identical.
+      * identity  (rbf argument >> 1 / gamma too large): K -> I,
+        effective rank -> L -- every subset looks equally diverse.
+
+    Computed ONCE on the L x L labeled Gram (already materialized by the caller),
+    with no eigensolve -- the q=2 effective rank is the closed-form participation
+    ratio (tr K)^2 / ||K||_F^2. Best-effort: never raises, returns {} on failure.
+
+    Keys are prefixed ``kernel_`` so wandb_utils routes them to al/query/kernel_*.
+    """
+    out = {}
+    try:
+        K = torch.as_tensor(K_LL, dtype=torch.float64)
+        L = K.shape[0]
+        if L < 2:
+            return out
+        eye = torch.eye(L, dtype=torch.bool, device=K.device)
+        off = K[~eye]
+
+        out["kernel_L"] = float(L)
+        out["kernel_offdiag_mean"] = off.mean().item()
+        out["kernel_offdiag_std"] = off.std().item()
+        out["kernel_offdiag_min"] = off.min().item()
+        out["kernel_offdiag_max"] = off.max().item()
+        # collapse fractions: how much of the off-diagonal has saturated to 1
+        # (all-ones) or to 0 (identity). Both near 0 = healthy spread.
+        out["kernel_frac_near_one"] = (off > 0.99).double().mean().item()
+        out["kernel_frac_near_zero"] = (off.abs() < 0.01).double().mean().item()
+
+        # q=2 effective rank (participation ratio): ~1 => all-ones collapse,
+        # ~L => identity collapse, in between => discriminative. No eigensolve.
+        diag = torch.diagonal(K)
+        eff = ((diag.sum() ** 2) / (K ** 2).sum().clamp(min=1e-12)).item()
+        out["kernel_eff_rank_q2"] = eff
+        out["kernel_eff_rank_frac"] = eff / L  # normalized to (0, 1]
+
+        if kernel == "rbf" and gamma is not None:
+            out["kernel_gamma"] = float(gamma)
+            # rbf entry = exp(-arg); recover the argument directly from the
+            # off-diagonal values (arg = -log K), no pairwise-distance recompute.
+            # Median argument is the robust bandwidth-health indicator:
+            # ~0 => all-ones, >>1 => identity, informative band ~ [0.1, 5].
+            med_k = off.clamp(min=1e-300).median().item()
+            out["kernel_rbf_arg_median"] = -math.log(med_k)
+    except Exception as e:  # diagnostics must never break acquisition
+        print(f"[WARN] kernel_diagnostics failed: {e}")
+    return out
+
+
+def vendi_from_features(vendi_cfg, feat_labeled, feat_unlabeled, diagnostics=None):
     """
     Args:
         vendi_cfg: the cfg.query.vendi sub-config carrying the kernel/Vendi
             settings; needs keys q, batch_size, gamma, kernel, approx.
         feat_labeled: (num_labeled, feature_dim)
         feat_unlabeled: (num_unlabeled, feature_dim)
+        diagnostics: optional mutable dict; if provided it is filled in-place
+            with kernel_diagnostics(...) (labeled-Gram health, resolved gamma).
+            Callers that don't pass it see no behavior change.
     Returns:
         scores: (num_unlabeled,)
 
@@ -830,6 +952,8 @@ def vendi_from_features(vendi_cfg, feat_labeled, feat_unlabeled):
     # K_LL and K_UL are kernel matrices
     K_LL = compute_kernel_matrix(vendi_cfg.kernel, gamma, feat_labeled, feat_labeled)
     K_LL = torch.as_tensor(K_LL, dtype=torch.float64, device=DEVICE)
+    if diagnostics is not None:
+        diagnostics.update(kernel_diagnostics(vendi_cfg.kernel, gamma, K_LL))
     K_UL = compute_kernel_matrix(vendi_cfg.kernel, gamma, feat_unlabeled, feat_labeled)
     K_UL = torch.as_tensor(K_UL, dtype=torch.float64, device=DEVICE)
 

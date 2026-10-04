@@ -17,3 +17,4 @@ vendi:
   grad_embedding_type: linear
   # labeled set uses ground-truth labels; the pool always uses argmax pseudo-labels
   labeled_true_labels: true
+  secular: false

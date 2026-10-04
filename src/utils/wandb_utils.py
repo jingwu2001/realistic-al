@@ -313,6 +313,27 @@ def _query_score_metrics(extra_info) -> dict:
     if "else" in extra_info:
         for name, v in zip(labels, np.asarray(extra_info["else"]).ravel()):
             out[f"al/query/unacquired_score_{name}"] = float(v)
+    # LinUCB arm that picked this round's batch: 0 = uncertainty (BALD),
+    # 1 = diversity (vendi, or vendi-q2 with query.bandit.use_vendi_q2)
+    if "bandit_arm" in extra_info:
+        out["al/query/bandit_arm"] = int(extra_info["bandit_arm"])
+    # Vendi kernel-conditioning diagnostics (see query_diversity.kernel_diagnostics):
+    # every ``kernel_*`` scalar becomes an al/query/kernel_* metric so kernel
+    # collapse (eff_rank_frac -> 0 all-ones, -> 1 identity) is visible per round.
+    for key, v in extra_info.items():
+        if key.startswith("kernel_"):
+            try:
+                out[f"al/query/{key}"] = float(v)
+            except (TypeError, ValueError):
+                pass  # skip non-scalar entries
+    # Top-B cutoff diagnostics (see query_diversity._boundary_tie_stats):
+    # boundary_gap == 0 / boundary_n_tied_excluded > 0 means part of the batch
+    # was picked by argsort's tie-break, not by score.
+    for key, v in (extra_info.get("boundary_ties") or {}).items():
+        if v is None:
+            continue  # no boundary (acq_size >= pool size)
+        name = key if key.startswith("boundary_") else f"boundary_{key}"
+        out[f"al/query/{name}"] = float(v)
     return out
 
 

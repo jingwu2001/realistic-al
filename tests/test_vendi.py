@@ -75,5 +75,45 @@ def test_vendi():
         import traceback
         traceback.print_exc()
 
+def test_boundary_gap_and_ties():
+    import numpy as np
+    from query.query_diversity import _boundary_tie_stats
+
+    # clean cutoff: batch {0, 1} beats the best left-out score (2.0) by 1.0
+    s = np.array([5.0, 3.0, 2.0, 1.0])
+    st = _boundary_tie_stats(s, np.array([0, 1]), 2)
+    assert st["gap"] == 1.0 and st["rel_gap"] == 1.0 / 3.0
+    assert st["n_tied"] == 1 and st["n_tied_excluded"] == 0
+
+    # cutoff inside a tie group of 3: one tied sample is picked by tie-break
+    # alone and two are excluded by luck
+    s = np.array([5.0, 3.0, 3.0, 3.0, 1.0])
+    st = _boundary_tie_stats(s, np.array([0, 2]), 2)
+    assert st["gap"] == 0.0 and st["rel_gap"] == 0.0
+    assert st["n_tied"] == 3 and st["n_tied_acquired"] == 1 and st["n_tied_excluded"] == 2
+
+    # whole pool acquired -> no boundary
+    st = _boundary_tie_stats(s, np.arange(5), 5)
+    assert st["gap"] is None and st["n_tied_excluded"] == 0
+
+
+def test_boundary_metrics_logged():
+    import numpy as np
+    from query.query_diversity import _boundary_tie_stats
+    from utils.wandb_utils import _query_score_metrics
+
+    st = _boundary_tie_stats(np.array([5.0, 3.0, 3.0, 1.0]), np.array([0, 1]), 2)
+    m = _query_score_metrics({"boundary_ties": st})
+    assert m["al/query/boundary_gap"] == 0.0
+    assert m["al/query/boundary_value"] == 3.0
+    assert m["al/query/boundary_n_tied_excluded"] == 1.0
+
+    # no-boundary case logs nothing for the None fields
+    st = _boundary_tie_stats(np.array([5.0, 3.0]), np.arange(2), 2)
+    m = _query_score_metrics({"boundary_ties": st})
+    assert "al/query/boundary_gap" not in m
+    assert m["al/query/boundary_n_tied"] == 0.0
+
+
 if __name__ == "__main__":
     test_vendi()
