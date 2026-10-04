@@ -1,0 +1,8 @@
+{
+  "al_summary/aubc_test_loss": 0.846127,
+  "al_summary/aubc_test_macro_auroc": 0.783765,
+  "al_summary/aubc_test_micro_auroc": 0.794533,
+  "al_summary/aubc_test_macro_auprc": 0.466525,
+  "al_summary/aubc_test_macro_f1": 0.463372,
+  "al_summary/aubc_test_acc": 0.755553
+}

@@ -1,0 +1,11 @@
+{
+  "al_summary/aubc_test_loss": 2.151992,
+  "al_summary/aubc_test_auroc": 0.667686,
+  "al_summary/aubc_test_auprc": 0.188027,
+  "al_summary/aubc_test_acc": 0.36822,
+  "al_summary/aubc_test_w_acc": 0.195019,
+  "al_summary/aubc_test_av_prec": 0.193865,
+  "al_summary/aubc_test_av_f1": 0.163958,
+  "al_summary/aubc_test_kappa": 0.378045,
+  "al_summary/aubc_test_bacc": 0.195019
+}

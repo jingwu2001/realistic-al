@@ -1,0 +1,11 @@
+{
+  "al_summary/aubc_test_loss": 5.122108,
+  "al_summary/aubc_test_auroc": 0.618604,
+  "al_summary/aubc_test_auprc": 0.286868,
+  "al_summary/aubc_test_f1": 0.167887,
+  "al_summary/aubc_test_phenotype_11_diabetes_mellitus_without_compli_auroc": 0.618604,
+  "al_summary/aubc_test_phenotype_11_diabetes_mellitus_without_compli_auprc": 0.286868,
+  "al_summary/aubc_test_phenotype_11_diabetes_mellitus_without_compli_f1": 0.167887,
+  "al_summary/aubc_test_phenotype_11_diabetes_mellitus_without_compli_acc": 0.754856,
+  "al_summary/aubc_test_acc": 0.754856
+}

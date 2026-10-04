@@ -1,0 +1,3 @@
+lr-Adam/pg1,lr-Adam/pg2,step,val/loss,val/auroc,val/auprc,val/f1,val/phenotype/11_diabetes_mellitus_without_compli/auroc,val/phenotype/11_diabetes_mellitus_without_compli/auprc,val/phenotype/11_diabetes_mellitus_without_compli/f1,val/phenotype/11_diabetes_mellitus_without_compli/acc,val/acc,epoch
+0.0005,0.0005,0,,,,,,,,,,
+,,6,2.4740517139434814,0.5612642168998718,0.24522581696510315,0.05010438337922096,0.5612642168998718,0.24522581696510315,0.05010438337922096,0.7862846255302429,0.7862846255302429,0

@@ -1,0 +1,11 @@
+{
+  "al_summary/aubc_test_loss": 0.835292,
+  "al_summary/aubc_test_auroc": 0.788432,
+  "al_summary/aubc_test_auprc": 0.610123,
+  "al_summary/aubc_test_f1": 0.577177,
+  "al_summary/aubc_test_phenotype_08_congestive_heart_failure_nonhype_auroc": 0.788432,
+  "al_summary/aubc_test_phenotype_08_congestive_heart_failure_nonhype_auprc": 0.610123,
+  "al_summary/aubc_test_phenotype_08_congestive_heart_failure_nonhype_f1": 0.577177,
+  "al_summary/aubc_test_phenotype_08_congestive_heart_failure_nonhype_acc": 0.726008,
+  "al_summary/aubc_test_acc": 0.726008
+}
