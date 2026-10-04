@@ -1,6 +1,9 @@
 import os
 import subprocess
+import threading
+import time
 from argparse import ArgumentParser, Namespace
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime
 from itertools import product
@@ -118,19 +121,30 @@ class BaseLauncher:
             key_use = self.validify_string_for_format(key)
             temp_dict[key_use] = val
 
-        temp_naming_convention = self.validify_string_for_format(self.naming_convention)
+        # bandit whose diversity arm runs vendi-q2: "acq-bandit-vq2" so its dirs
+        # don't collide with plain bandit runs (mirrors the wandb run name)
+        if naming_dict.get("query") == "bandit" and naming_dict.get("query.bandit.use_vendi_q2"):
+            temp_dict["query"] = "bandit-vq2"
+
+        # Strip the vendi-specific parts BEFORE removing dots: these placeholders
+        # only resolve for vendi/bandit queries, and the replace strings are
+        # dotted, so they must run on the un-validified convention (otherwise the
+        # dots are already gone and the replace silently no-ops -> KeyError).
+        naming_convention = self.naming_convention
 
         # Check if query is bandit or vendi, if not remove Vendi params from naming convention
         query = naming_dict.get("query")
         if query not in ["bandit", "vendi"]:
             # Remove the Vendi specific parts
-            temp_naming_convention = temp_naming_convention.replace("_norm-{query.vendi.normalization}", "")
-            temp_naming_convention = temp_naming_convention.replace("_kernel-{query.vendi.kernel}", "")
-            temp_naming_convention = temp_naming_convention.replace("_gamma-{query.vendi.gamma}", "")
-            
+            naming_convention = naming_convention.replace("_norm-{query.vendi.normalization}", "")
+            naming_convention = naming_convention.replace("_kernel-{query.vendi.kernel}", "")
+            naming_convention = naming_convention.replace("_gamma-{query.vendi.gamma}", "")
+
         kernel = naming_dict.get("query.vendi.kernel")
         if query in ['bandit', 'vendi'] and kernel == 'cosine':
-            temp_naming_convention = temp_naming_convention.replace("_gamma-{query.vendi.gamma}", "")
+            naming_convention = naming_convention.replace("_gamma-{query.vendi.gamma}", "")
+
+        temp_naming_convention = self.validify_string_for_format(naming_convention)
 
         return temp_naming_convention.format_map(temp_dict)
 
@@ -178,6 +192,16 @@ class BaseLauncher:
         )
         parser.add_argument(
             "--notes", default="", type=str, help="Notes to attach to the wandb run"
+        )
+        parser.add_argument(
+            "-j", "--jobs", default=1, type=int,
+            help="Run up to N experiments concurrently from one work queue "
+                 "(1 = sequential). Bounded in practice by host RAM per run.",
+        )
+        parser.add_argument(
+            "--stagger", default=30.0, type=float,
+            help="Min seconds between two run starts when --jobs > 1 (spreads "
+                 "data loading; also keeps per-second log filenames unique)",
         )
         return parser
 
@@ -292,17 +316,24 @@ class BaseLauncher:
         caught, logged, and the launcher continues with the next run. Any
         failures are summarized at the end. (Runs became able to exit non-zero
         once main.py stopped swallowing exceptions — see @logger.catch(reraise).)
+
+        With --jobs N > 1 the runs form a work queue drained by N workers, in
+        the same order as the sequential sweep (so put slow configs first);
+        starts are spaced by --stagger seconds. Ctrl-C kills the running
+        run(s) and cancels queued ones.
         """
         experiment_root = os.environ.get("EXPERIMENT_ROOT", "experiments")
         total = len(self.parsed_product)
-        failures = []
+        jobs = max(1, getattr(self.launcher_args, "jobs", 1))
+        stagger = max(1.0, getattr(self.launcher_args, "stagger", 30.0))
+
+        runs = []
         for i, (config_dict, param_dict) in enumerate(self.parsed_product):
             counter = i + 1
             if counter <= self.launcher_args.num_start or (
                 counter > self.launcher_args.num_end and self.launcher_args.num_end > 0
             ):
                 continue
-            print(f"Launch: {counter}/{total}")
 
             config_args = self.dict_to_arg(config_dict)
             param_args = self.dict_to_arg(param_dict, prefix="++")
@@ -318,28 +349,95 @@ class BaseLauncher:
             if getattr(self.launcher_args, "dry_run", False):
                 full_args += " ++trainer.experiments_root=/tmp/dry_run"
             launch_command = f"{self.ex_call} {self.path_to_ex_file} {full_args}"
+            runs.append((counter, experiment_name, launch_command))
 
-            print(launch_command)
-            if self.launcher_args.debug:
-                continue
+        if self.launcher_args.debug:
+            for counter, _, launch_command in runs:
+                print(f"Launch: {counter}/{total}")
+                print(launch_command)
+            return
 
+        stop = threading.Event()
+        start_lock = threading.Lock()
+        last_start = [float("-inf")]
+        # live children, so Ctrl-C can kill them: Lightning 1.9 swallows the
+        # SIGINT inside fit() and main.py would carry on with the next AL loop
+        procs_lock = threading.Lock()
+        procs = set()
+
+        def call(launch_command, **kwargs):
+            with procs_lock:
+                if stop.is_set():
+                    return
+                # exec: /bin/sh would otherwise fork, and killing the shell
+                # would orphan the python run
+                proc = subprocess.Popen("exec " + launch_command, shell=True, **kwargs)
+                procs.add(proc)
+            try:
+                returncode = proc.wait()
+            except KeyboardInterrupt:  # only reached in the sequential path
+                proc.kill()
+                raise
+            with procs_lock:
+                procs.discard(proc)
+            if returncode != 0:
+                raise subprocess.CalledProcessError(returncode, launch_command)
+
+        def run_one(counter, experiment_name, launch_command):
+            if jobs > 1:
+                # space out starts: smooths the ~10 GB data load per run and
+                # keeps the per-second log filenames below from colliding
+                with start_lock:
+                    time.sleep(max(0.0, last_start[0] + stagger - time.monotonic()))
+                    last_start[0] = time.monotonic()
+            if stop.is_set():
+                return None
+            print(f"Launch: {counter}/{total}\n{launch_command}", flush=True)
             log_path = None
             try:
                 if getattr(self.launcher_args, "dry_run", False):
-                    subprocess.run(launch_command, shell=True, check=True, env=os.environ)
+                    call(launch_command, env=os.environ)
                 else:
                     log_dir = os.path.join(experiment_root, "activelearning", experiment_name)
                     os.makedirs(log_dir, exist_ok=True)
                     log_path = os.path.join(log_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + ".log")
-                    print(f"Logging to: {log_path}")
+                    print(f"Logging to: {log_path}", flush=True)
                     with open(log_path, "w") as log_file:
-                        subprocess.run(launch_command, shell=True, check=True, stdout=log_file, stderr=log_file)
+                        call(launch_command, stdout=log_file, stderr=log_file)
             except subprocess.CalledProcessError as e:
                 msg = f"[WARNING] run {counter}/{total} failed (exit {e.returncode}); continuing to next run."
                 if log_path is not None:
                     msg += f" See {log_path}"
-                print(msg)
-                failures.append((counter, experiment_name, log_path))
+                print(msg, flush=True)
+                return (counter, experiment_name, log_path)
+            if jobs > 1:
+                print(f"Done: {counter}/{total}", flush=True)
+            return None
+
+        failures = []
+        if jobs == 1:
+            for run in runs:
+                result = run_one(*run)
+                if result is not None:
+                    failures.append(result)
+        else:
+            print(f"Running {len(runs)} run(s) with {jobs} concurrent jobs (stagger {stagger:.0f}s)")
+            executor = ThreadPoolExecutor(max_workers=jobs)
+            futures = [executor.submit(run_one, *run) for run in runs]
+            try:
+                for future in futures:
+                    result = future.result()
+                    if result is not None:
+                        failures.append(result)
+            except KeyboardInterrupt:
+                print("\n[INTERRUPT] cancelling queued runs, killing running ones.", flush=True)
+                with procs_lock:
+                    stop.set()
+                    for proc in procs:
+                        proc.kill()
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            executor.shutdown()
 
         if failures:
             print(f"\n[SUMMARY] {len(failures)}/{total} run(s) FAILED:")
