@@ -1,4 +1,5 @@
 from typing import Tuple, Optional, Union
+from contextlib import contextmanager
 from tqdm import tqdm
 import sys
 import os
@@ -214,6 +215,38 @@ def chunked_pdist(
     return dists
 
 
+@contextmanager
+def disable_mc_dropout(model: torch.nn.Module):
+    """Temporarily neutralize every ConsistentMCDropout in ``model``.
+
+    ConsistentMCDropout keeps applying dropout even in eval mode (MC-dropout by
+    design, see ``models.bayesian_module``). That is what we want for BALD/uncertainty
+    acquisition, but NOT for the BADGE-style gradient embeddings computed here:
+    the head's dropout randomizes the softmax output (hence the error vector
+    ``p_x - e_y``, and even the argmax pseudo-label) and, for non-small-head
+    models, zeros out ~p of the penultimate-feature entries that form the
+    outer-product embedding. Both make the last-layer gradient stochastic, whereas
+    BADGE/gvendi assume a deterministic embedding.
+
+    We set ``p=0`` and drop the cached mask for the duration of the ``with`` block,
+    then restore the original ``p`` (and reset the mask so the next real forward
+    rebuilds it at the restored ``p``). The uncertainty/BALD path, which runs its
+    own forward passes outside this context, is unaffected.
+    """
+    touched = []
+    for module in model.modules():
+        if isinstance(module, ConsistentMCDropout):
+            touched.append((module, module.p))
+            module.p = 0.0
+            module.reset()  # discard any mask cached at the old p
+    try:
+        yield
+    finally:
+        for module, p in touched:
+            module.p = p
+            module.reset()  # force a fresh mask at the restored p on next use
+
+
 def get_grad_embedding(
     model: torch.nn.Module,
     dataloader: DataLoader,
@@ -221,7 +254,7 @@ def get_grad_embedding(
     device: str = "cuda:0",
     use_true_labels: bool = False,
 ) -> torch.Tensor:
-    """Compute gradient embedding of final layer of model for each input in dataloader.
+    """Compute gradient embedding of final layer of `model` for each input in dataloader.
 
     The per-sample gradient of the cross-entropy loss w.r.t. the last linear layer
     factorizes as g_x = (p_x - e_{y_x}) h_x^T, where p_x is the softmax output,
@@ -249,53 +282,56 @@ def get_grad_embedding(
     assert hasattr(
         model.model, "classifier"
     )  # model.model requires classification head (due to code).
-    for i, (x, y) in enumerate(dataloader):
-        if isinstance(x, (list, tuple)):
-            inputs = [t.to(device) if isinstance(t, torch.Tensor) else t for t in x]
-        else:
-            inputs = x.to(device)
-        with torch.no_grad():
-            features = model.get_features(inputs)  # B x Z
-        l1 = features  # B x Z
-        if not model.hparams.model.small_head and isinstance(model.model.classifier, nn.Sequential):
-            l1 = model.model.classifier[:-1](features)
-        embDim = l1.shape[-1]
-        outputs = model.model.classifier(features)
+    # Disable MC-dropout for the whole embedding pass: the head's dropout would
+    # otherwise randomize the softmax output (the error vector p_x - e_y) and, on
+    # non-small-head models, zero out ~p of the penultimate features that form the
+    # outer-product embedding -- making the last-layer gradient stochastic. BADGE
+    # (and gvendi, query.vendi.use_grad=true) assume a deterministic embedding.
+    with disable_mc_dropout(model):
+        for i, (x, y) in enumerate(dataloader):
+            if isinstance(x, (list, tuple)):
+                inputs = [t.to(device) if isinstance(t, torch.Tensor) else t for t in x]
+            else:
+                inputs = x.to(device)
+            with torch.no_grad():
+                features = model.get_features(inputs)  # B x Z
+            l1 = features  # B x Z
+            if not model.hparams.model.small_head and isinstance(model.model.classifier, nn.Sequential):
+                l1 = model.model.classifier[:-1](features)
+            outputs = model.model.classifier(features)
 
-        if use_true_labels:
-            # ground-truth labels (labeled set)
-            targets = y.to(device).long()
-        else:
-            # hard argmax pseudo-labels (unlabeled pool, BADGE convention)
-            targets = torch.argmax(outputs, dim=1)
+            if use_true_labels:
+                # ground-truth labels (labeled set)
+                targets = y.to(device).long()
+            else:
+                # hard argmax pseudo-labels (unlabeled pool, BADGE convention)
+                targets = torch.argmax(outputs, dim=1)
+            loss = F.cross_entropy(outputs, targets, reduction="sum")
+            l0_grads = torch.autograd.grad(loss, outputs)[0]  # B x C, patial L / partial z_i = p_i - \delta_iy
 
-        loss = F.cross_entropy(outputs, targets, reduction="sum")
-        l0_grads = torch.autograd.grad(loss, outputs)[0]  # B x C
+            # Calculate the linear layer gradients as well if needed
+            if grad_embedding_type != "bias":
+                l1_grads = (l0_grads.unsqueeze(2) * l1.unsqueeze(1)).flatten(1)   # (B,C,1)*(B,1,Z)->(B,C,Z)->(B,C*Z)
 
-        # Calculate the linear layer gradients as well if needed
-        if grad_embedding_type != "bias":
-            l0_expand = torch.repeat_interleave(l0_grads, embDim, dim=1)
-            l1_grads = l0_expand * l1.repeat(1, outputs.shape[-1])  # B x C*Z
-
-        # Populate embedding tensor according to the supplied argument.
-        if grad_embedding_type == "bias":
-            gradient_embedding = l0_grads
-        elif grad_embedding_type == "linear":
-            gradient_embedding = l1_grads
-        else:
-            gradient_embedding = torch.cat([l0_grads, l1_grads], dim=1)
-        if i == 0:
-            gradient_embeddings = torch.empty(
-                [len(dataloader.dataset), gradient_embedding.shape[1]], device="cpu"
-            )
-        # detach: l1 may carry an autograd graph through the classifier weights
-        # (non-small-head models); storing it detached keeps the result a plain
-        # tensor so downstream .numpy()/kernel ops don't drag the graph along.
-        gradient_embeddings[
-            start_index : start_index + gradient_embedding.shape[0]
-        ] = gradient_embedding.detach().to("cpu")
-        start_index += gradient_embedding.shape[0]
-        torch.cuda.empty_cache()
+            # Populate embedding tensor according to the supplied argument.
+            if grad_embedding_type == "bias":
+                gradient_embedding = l0_grads
+            elif grad_embedding_type == "linear":
+                gradient_embedding = l1_grads
+            else:
+                gradient_embedding = torch.cat([l0_grads, l1_grads], dim=1)
+            if i == 0:
+                gradient_embeddings = torch.empty(
+                    [len(dataloader.dataset), gradient_embedding.shape[1]], device="cpu"
+                )
+            # detach: l1 may carry an autograd graph through the classifier weights
+            # (non-small-head models); storing it detached keeps the result a plain
+            # tensor so downstream .numpy()/kernel ops don't drag the graph along.
+            gradient_embeddings[
+                start_index : start_index + gradient_embedding.shape[0]
+            ] = gradient_embedding.detach().to("cpu")
+            start_index += gradient_embedding.shape[0]
+            torch.cuda.empty_cache()
     return gradient_embeddings
 
 
