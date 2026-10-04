@@ -12,7 +12,7 @@ from omegaconf import DictConfig
 
 import utils
 from data.base_datamodule import BaseDataModule
-from run_training import get_torchvision_dm, label_active_dm
+from run_training import get_torchvision_dm, label_active_dm, setup_pheno_task
 from trainer import ActiveTrainingLoop
 from query.bandit import BanditManager
 from utils import config_utils
@@ -30,6 +30,7 @@ from utils.wandb_utils import (
 def main(cfg: DictConfig):
     setup_logger()
     logger.info("Start logging")
+    setup_pheno_task(cfg)
     config_utils.print_config(cfg)
     logger.info("Set seed")
     utils.set_seed(cfg.trainer.seed)
@@ -125,8 +126,17 @@ def active_loop(
 
     def _label_dist(targets) -> str:
         tgts = np.asarray(targets)
-        classes, counts = np.unique(tgts, return_counts=True)
         total = len(tgts)
+        if tgts.ndim > 1:
+            # Multi-label (e.g. mimic3_pheno): per-label positive counts, not a
+            # single class histogram (np.unique would flatten the multi-hot).
+            pos = tgts.sum(axis=0).astype(int)
+            return (
+                f"n={total}  multilabel C={tgts.shape[1]}  "
+                f"pos/label min/med/max={int(pos.min())}/{int(np.median(pos))}/"
+                f"{int(pos.max())}  mean_labels/row={tgts.sum(axis=1).mean():.2f}"
+            )
+        classes, counts = np.unique(tgts, return_counts=True)
         parts = [f"{int(c)}: {int(n)} ({100*n/total:.1f}%)" for c, n in zip(classes, counts)]
         return f"n={total}  " + "  ".join(parts)
 

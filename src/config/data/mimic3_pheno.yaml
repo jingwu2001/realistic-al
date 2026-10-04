@@ -1,0 +1,28 @@
+name: mimic3_pheno
+shape: [24, 387]
+num_classes: 25  # 25 HCUP CCS 2015 phenotype conditions (Harutyunyan et al. 2019).
+                 # MULTI-LABEL: 25 independent Bernoulli labels, not mutually
+                 # exclusive. See MIMIC3PhenotypeDataset. Headline metric
+                 # val/test macro_auroc (mean per-label AUROC).
+multilabel: true  # switches the shared classifier to sigmoid/BCE + the
+                  # multi-label metric callback (see abstract_classifier / trainer).
+                  # Stays true in single-task mode (1 sigmoid output).
+multitask: true   # true -> all 25 conditions jointly (num_classes 25).
+                  # false -> only condition `task_id`: scalar (1-logit) output,
+                  # num_classes set to 1 at startup (run_training.setup_pheno_task),
+                  # binary val/test auroc/auprc/f1, wandb data name mimic3_pheno_tNN.
+task_id: null     # 0-based phenotype.npy column (PHENO_CONDITION_NAMES in
+                  # data/mimic_dataset.py); required when multitask=false, e.g.
+                  #   8 = Congestive heart failure; nonhypertensive
+                  #  11 = Diabetes mellitus without complication
+val_split: 0.1
+mean: [0.0]
+std: [1.0]
+transform_train: basic
+transform_test: basic
+balanced_sampling: false
+# balanced_test_val has no single-label meaning here; keep off.
+balanced_test_val: false
+# true -> keep only patients with exactly one ICU stay (runtime filter; drops
+# multi-stay patients entirely). Needs subject_ids.
+single_stay_only: false

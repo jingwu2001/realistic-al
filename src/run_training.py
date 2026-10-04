@@ -7,6 +7,7 @@ from omegaconf import DictConfig, OmegaConf
 import utils
 from data.base_datamodule import BaseDataModule
 from data.data import TorchVisionDM
+from data.mimic_dataset import PHENO_CONDITION_NAMES, pheno_single_task_id
 from data.timeseriesdata import TimeSeriesDM
 from trainer import ActiveTrainingLoop
 from utils import config_utils
@@ -17,8 +18,27 @@ from utils.log_utils import setup_logger
 def main(cfg: DictConfig):
     setup_logger()
     logger.info("Start logging")
+    setup_pheno_task(cfg)
     config_utils.print_config(cfg)
     train(cfg)
+
+
+def setup_pheno_task(cfg: DictConfig) -> None:
+    """mimic3_pheno single-task mode (``data.multitask=false``): train only on
+    condition ``data.task_id`` -> one sigmoid output, so ``data.num_classes`` is
+    set to 1 here. Call at startup, before anything reads ``data.num_classes``
+    (wandb config, model head, datamodule). No-op for other datasets.
+    """
+    if cfg.data.name != "mimic3_pheno":
+        return
+    task_id = pheno_single_task_id(cfg.data)
+    if task_id is None:
+        return
+    cfg.data.num_classes = 1
+    logger.info(
+        f"mimic3_pheno single-task: task_id={task_id} "
+        f"({PHENO_CONDITION_NAMES[task_id]}), num_classes=1"
+    )
 
 
 def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> BaseDataModule:
@@ -53,8 +73,11 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> BaseData
     single_stay_only = False
     if "single_stay_only" in cfg.data:
         single_stay_only = cfg.data.single_stay_only
+    pheno_task_id = None
+    if cfg.data.name == "mimic3_pheno":
+        pheno_task_id = pheno_single_task_id(cfg.data)
 
-    time_series_datasets = {"ecg5000", "p12", "p12_transformer", "mimic3_sand", "mimic3_los"}
+    time_series_datasets = {"ecg5000", "p12", "p12_transformer", "mimic3_sand", "mimic3_los", "mimic3_pheno"}
     dm_cls = TimeSeriesDM if cfg.data.name in time_series_datasets else TorchVisionDM
 
     datamodule = dm_cls(
@@ -82,6 +105,7 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> BaseData
         balanced_sampling=balanced_sampling,
         balanced_test_val=balanced_test_val,
         single_stay_only=single_stay_only,
+        pheno_task_id=pheno_task_id,
     )
 
     return datamodule

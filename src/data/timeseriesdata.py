@@ -6,7 +6,11 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from data.ecg5000_dataset import ECG5000Dataset
-from data.mimic_dataset import MIMIC3ICUDataset, MIMIC3LOSDataset
+from data.mimic_dataset import (
+    MIMIC3ICUDataset,
+    MIMIC3LOSDataset,
+    MIMIC3PhenotypeDataset,
+)
 from data.p12_dataset import P12Dataset, P12TransformerDataset
 
 from .active import ActiveLearningDataset
@@ -46,6 +50,7 @@ class TimeSeriesDM(BaseDataModule):
         balanced_sampling: bool = False,
         balanced_test_val: bool = False, # Forces test set and validation set to be balanced
         single_stay_only: bool = False, # mimic3_sand: keep only patients with exactly one ICU stay
+        pheno_task_id: Optional[int] = None, # mimic3_pheno: single condition (None = all 25)
     ):
         super().__init__(
             val_split=val_split,
@@ -86,6 +91,7 @@ class TimeSeriesDM(BaseDataModule):
         self.imb_factor = imb_factor
         self.balanced_test_val = balanced_test_val
         self.single_stay_only = single_stay_only
+        self.pheno_task_id = pheno_task_id
 
         ### IMPLEMENTATION ###
         # Novel image datasets can be added here
@@ -99,6 +105,8 @@ class TimeSeriesDM(BaseDataModule):
             self.dataset_cls = MIMIC3ICUDataset
         elif self.dataset == "mimic3_los":
             self.dataset_cls = MIMIC3LOSDataset
+        elif self.dataset == "mimic3_pheno":
+            self.dataset_cls = MIMIC3PhenotypeDataset
         else:
             raise NotImplementedError
         self._setup_datasets()
@@ -330,6 +338,45 @@ class TimeSeriesDM(BaseDataModule):
 
         return np.sort(to_idx(sel)), np.sort(to_idx(pool_groups))
 
+    def _grouped_val_pool_split_multilabel(self, labels, groups, val_size):
+        """Patient-grouped RANDOM val/pool carve for the multi-label phenotyping
+        task (``mimic3_pheno``).
+
+        The label is a ``(n, C)`` multi-hot vector, so there is no single class
+        to stratify on (the binary and multiclass splitters both collapse it and
+        would misbehave). We instead carve ~``val_size`` samples by shuffling
+        patient groups (keeping each patient's stays together) and taking groups
+        until the val budget is met; the remainder is the labelled pool. Every
+        group lands in exactly one side, so no sample is dropped. Seeded by
+        ``self.seed`` (val varies per seed; the test object is fixed on disk).
+        """
+        labels = np.asarray(labels)  # (n, C) — unused for stratification
+        groups = np.asarray(groups)
+        rng = np.random.default_rng(self.seed)
+
+        order = np.argsort(groups, kind="stable")
+        _, start = np.unique(groups[order], return_index=True)
+        member_lists = np.split(order, start[1:])
+        group_size = np.array([len(m) for m in member_lists])
+
+        gidx = np.arange(len(member_lists))
+        rng.shuffle(gidx)
+        sel, got = [], 0
+        for gi in gidx:
+            if got >= val_size:
+                break
+            sel.append(int(gi))
+            got += int(group_size[gi])
+        sel_set = set(sel)
+        pool_groups = [g for g in range(len(member_lists)) if g not in sel_set]
+        assert pool_groups, f"no groups left for the pool (val_size={val_size})"
+
+        def to_idx(s):
+            return (np.concatenate([member_lists[g] for g in s])
+                    if s else np.array([], dtype=int))
+
+        return np.sort(to_idx(sel)), np.sort(to_idx(pool_groups))
+
     def _balanced_indices(self, labels):
         """Indices of a class-balanced subset (equal per class, majority
         downsampled), used to build balanced eval sets from a fixed test/val
@@ -380,17 +427,29 @@ class TimeSeriesDM(BaseDataModule):
         # so the test cohort is identical across seeds. We only carve the      #
         # validation set from the train object, per seed.                      #
         # ------------------------------------------------------------------ #
-        if self.dataset in ("mimic3_sand", "mimic3_los"):
-            # Both tasks share the same on-disk objects (built by
-            # preprocess_mimic3_sand.py); only the label differs, which is
-            # handled by self.dataset_cls (MIMIC3ICUDataset / MIMIC3LOSDataset).
+        if self.dataset in ("mimic3_sand", "mimic3_los", "mimic3_pheno"):
+            # All three tasks share the same on-disk objects (built by
+            # preprocess_mimic3_sand.py); only the label file differs, handled by
+            # self.dataset_cls (MIMIC3ICUDataset / MIMIC3LOSDataset /
+            # MIMIC3PhenotypeDataset).
             _root = os.path.join(self.data_root, "mimic3_sand")
+            _obj_kwargs = dict(single_stay_only=self.single_stay_only)
+            if self.dataset == "mimic3_pheno":
+                _obj_kwargs["task_id"] = self.pheno_task_id
 
-            _train_obj = self.dataset_cls(_root, train=True, single_stay_only=self.single_stay_only)
+            _train_obj = self.dataset_cls(_root, train=True, **_obj_kwargs)
             _n_train_obj = len(_train_obj.targets)
             _val_size = (self.val_split if isinstance(self.val_split, int)
                          else max(1, round(self.val_split * _n_train_obj)))
-            if self.dataset == "mimic3_los":
+            if self.dataset == "mimic3_pheno":
+                # multi-label (25-condition): no single class to stratify on ->
+                # patient-grouped random carve. Also used in single-task mode:
+                # the carve ignores labels, so val/pool match the multi-task
+                # runs of the same seed.
+                _val_idx, _pool_idx = self._grouped_val_pool_split_multilabel(
+                    _train_obj.targets, _train_obj.groups, _val_size,
+                )
+            elif self.dataset == "mimic3_los":
                 # multiclass (9-class LOS): the binary pos/neg split would drop
                 # any patient whose LOS bin is >= 2.
                 _val_idx, _pool_idx = self._grouped_val_pool_split_multiclass(
@@ -404,18 +463,18 @@ class TimeSeriesDM(BaseDataModule):
 
             # train (labelled pool universe)
             self.train_set = ActiveSubset(
-                self.dataset_cls(_root, train=True, single_stay_only=self.single_stay_only), _pool_idx
+                self.dataset_cls(_root, train=True, **_obj_kwargs), _pool_idx
             )
             if self.active:
                 # handles normalisation internally; no transform attribute
                 self.train_set = ActiveLearningDataset(self.train_set)
 
             # validation (carved from the train object, per seed)
-            _val_full = self.dataset_cls(_root, train=True, single_stay_only=self.single_stay_only)
+            _val_full = self.dataset_cls(_root, train=True, **_obj_kwargs)
             self.val_set = Subset(_val_full, _val_idx)
 
             # test (fixed on-disk object, identical across seeds)
-            _test_full = self.dataset_cls(_root, train=False, single_stay_only=self.single_stay_only)
+            _test_full = self.dataset_cls(_root, train=False, **_obj_kwargs)
             _test_idx = (self._balanced_indices(_test_full.targets)
                          if self.balanced_test_val else np.arange(len(_test_full)))
             self.test_set = Subset(_test_full, _test_idx)

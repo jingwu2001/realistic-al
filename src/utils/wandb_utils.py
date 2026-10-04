@@ -9,7 +9,12 @@ Metric-namespace conventions
   learning round belongs under ``al/``.
 - ``al/query/*`` carries query-time score diagnostics (acquired / unacquired
   score distribution) so drift across rounds is visible directly in the wandb
-  UI instead of only in the ``extra_info_{i}.npz`` files on disk.
+  UI instead of only in the ``extra_info_{i}.npz`` files on disk. For
+  ``query=bandit`` it also carries ``al/query/bandit_arm`` (arm chosen per round).
+- ``al/phenotype/*`` is the multi-label (mimic3_pheno) per-condition subtab:
+  ``al/phenotype/{label}/{mode}_{metric}`` gives each of the 25 binary tasks
+  its own acc / auroc / auprc / f1 curve (val + test), next to the headline
+  macro metrics under ``al/``.
 - ``init_label_dist/*`` summary keys capture the per-split label distribution
   once at the start of the run.
 
@@ -28,6 +33,8 @@ import wandb
 from hydra.core.hydra_config import HydraConfig
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+
+from data.mimic_dataset import pheno_single_task_id
 
 
 # --------------------------------------------------------------------------- #
@@ -213,6 +220,12 @@ def init_wandb(cfg: DictConfig):
     # the data-config choice (e.g. "p12_transformer_baleval", "cifar10_imb")
     # distinguishes eval-split/imbalance variants that share cfg.data.name
     data_name = hydra_choices.get("data", None) or cfg.data.name
+    if cfg.data.name == "mimic3_pheno":
+        # single-task phenotyping gets its own name/group/tag per condition,
+        # e.g. "mimic3_pheno_t08", so it never pools with the 25-label runs
+        task_id = pheno_single_task_id(cfg.data)
+        if task_id is not None:
+            data_name = f"{data_name}_t{task_id:02d}"
 
     # git commit for the session tag; fall back gracefully outside a checkout
     # (e.g. a bare copy on a cluster).
@@ -279,6 +292,11 @@ def _read_loop_metrics(log_dir) -> dict:
 
     val/* -> max across epochs (best checkpoint value)
     train/* and test/* -> last non-NaN value
+
+    Per-label phenotyping columns (``{mode}/phenotype/{label}/{metric}``) are
+    routed into the ``al/phenotype/*`` subtab grouped by condition, i.e.
+    ``al/phenotype/{label}/{mode}_{metric}``, so each of the 25 binary tasks
+    gets its own panel group; everything else keeps the flat ``al/`` naming.
     """
     try:
         df = pd.read_csv(os.path.join(log_dir, "metrics.csv"))
@@ -289,11 +307,14 @@ def _read_loop_metrics(log_dir) -> dict:
             series = df[col].dropna()
             if series.empty:
                 continue
-            if col.startswith("val/"):
-                val = series.max()
+            mode = col.split("/", 1)[0]
+            val = series.max() if mode == "val" else series.iloc[-1]
+            if "/phenotype/" in col:
+                # test/phenotype/08_chf/auroc -> al/phenotype/08_chf/test_auroc
+                label_token, metric = col.split("/phenotype/", 1)[1].rsplit("/", 1)
+                result[f"al/phenotype/{label_token}/{mode}_{metric}"] = val
             else:
-                val = series.iloc[-1]
-            result[f"al/{col.replace('/', '_')}"] = val
+                result[f"al/{col.replace('/', '_')}"] = val
         return result
     except Exception as e:
         logger.warning(f"Failed to read loop metrics from {log_dir}: {e}")
@@ -426,8 +447,17 @@ def log_label_distributions(wandb_run, datamodule):
 
     def _dist_counts(targets) -> dict:
         tgts = np.asarray(targets)
-        classes, counts = np.unique(tgts, return_counts=True)
         total = len(tgts)
+        if tgts.ndim > 1:
+            # Multi-label (e.g. mimic3_pheno): per-label positive counts/pct
+            # (np.unique would flatten the multi-hot into {0,1}).
+            d = {"n": int(total), "n_labels": int(tgts.shape[1])}
+            pos = tgts.sum(axis=0).astype(int)
+            for c in range(tgts.shape[1]):
+                d[f"label_{c}_count"] = int(pos[c])
+                d[f"label_{c}_pct"] = round(100 * pos[c] / total, 2) if total else 0.0
+            return d
+        classes, counts = np.unique(tgts, return_counts=True)
         d = {"n": int(total)}
         for c, n in zip(classes, counts):
             d[f"class_{int(c)}_count"] = int(n)

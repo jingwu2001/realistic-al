@@ -20,6 +20,8 @@ class BayesianModule(AbstractClassifier):
         """
         super().__init__(eman=True)
         self.save_hyperparameters(config)
+        # Multi-label task (e.g. mimic3_pheno): sigmoid/BCE head + metrics.
+        self.multilabel = "multilabel" in config.data and bool(config.data.multilabel)
         self.model = build_model(
             config, num_classes=config.data.num_classes, data_shape=config.data.shape
         )
@@ -28,12 +30,17 @@ class BayesianModule(AbstractClassifier):
             self.load_from_ssl_checkpoint()
         self.init_ema_model(use_ema=config.model.use_ema)
 
-        weighted_loss = False
-        if "weighted_loss" in self.hparams.model:
-            weighted_loss = self.hparams.model.weighted_loss
-        if weighted_loss:
-            # the weights are overwritten at a later stage.
-            self.loss_fct = nn.NLLLoss(weight=torch.ones(self.hparams.data.num_classes))
+        if self.multilabel:
+            # Default multi-label loss; per-label pos_weight is filled in by
+            # setup_data_params when model.weighted_loss is set.
+            self.loss_fct = nn.BCEWithLogitsLoss()
+        else:
+            weighted_loss = False
+            if "weighted_loss" in self.hparams.model:
+                weighted_loss = self.hparams.model.weighted_loss
+            if weighted_loss:
+                # the weights are overwritten at a later stage.
+                self.loss_fct = nn.NLLLoss(weight=torch.ones(self.hparams.data.num_classes))
 
     def training_step(
         self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int

@@ -105,11 +105,13 @@ def query_sampler(
 
 
 def _get_bay_entropy_fct(pt_model: torch.nn.Module):
+    multilabel = getattr(pt_model, "multilabel", False)
+
     def acq_bay_entropy(x: torch.Tensor):
         """Returns the Entropy of predictions of the bayesian model"""
         with torch.no_grad():
             out = pt_model(x, agg=False)  # BxkxD
-            ent = pred_entropy(out)
+            ent = pred_entropy_multilabel(out) if multilabel else pred_entropy(out)
         return ent
 
     return acq_bay_entropy
@@ -127,11 +129,15 @@ def _get_exp_entropy_fct(pt_model: torch.nn.Module):
 
 
 def _get_bald_fct(pt_model: torch.nn.Module):
+    multilabel = getattr(pt_model, "multilabel", False)
+
     def acq_bald(x: torch.Tensor):
         """Returns the BALD-acq values (Mutual Information) between most likely labels and the model parameters"""
         with torch.no_grad():
             out = pt_model(x, agg=False)
-            mut_info = mutual_bald(out)
+            mut_info = (
+                mutual_bald_multilabel(out) if multilabel else mutual_bald(out)
+            )
         return mut_info
 
     return acq_bald
@@ -197,6 +203,39 @@ def exp_entropy(logits: torch.Tensor):
 
 def mutual_bald(logits: torch.Tensor):
     return pred_entropy(logits) - exp_entropy(logits)
+
+
+# --- Multi-label (independent Bernoulli per label) variants -------------------
+# For the 25-condition phenotyping task each label is an independent Bernoulli,
+# so the categorical softmax entropies above do not apply. The predictive/
+# expected entropies factorise into a SUM over the C labels of the per-label
+# binary entropy, and BALD is the sum of per-label binary mutual information.
+
+
+def _binary_entropy(p: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+    """Elementwise Bernoulli entropy of probabilities ``p``."""
+    p = p.clamp(eps, 1 - eps)
+    return -(p * torch.log(p) + (1 - p) * torch.log1p(-p))
+
+
+def pred_entropy_multilabel(logits: torch.Tensor) -> torch.Tensor:
+    """H[E_w p]: sum over labels of the Bernoulli entropy of the MC-mean
+    predictive. ``logits`` is ``(B, k, C)``; returns ``(B,)``."""
+    p_bar = torch.sigmoid(logits).mean(dim=1)  # (B, C) MC-marginal Bernoulli
+    return _binary_entropy(p_bar).sum(dim=1)
+
+
+def exp_entropy_multilabel(logits: torch.Tensor) -> torch.Tensor:
+    """E_w[H[p]]: sum over labels of the MC-mean of the per-sample Bernoulli
+    entropy. ``logits`` is ``(B, k, C)``; returns ``(B,)``."""
+    h = _binary_entropy(torch.sigmoid(logits))  # (B, k, C)
+    return h.mean(dim=1).sum(dim=1)
+
+
+def mutual_bald_multilabel(logits: torch.Tensor) -> torch.Tensor:
+    """Multi-label BALD = sum over labels of per-label binary mutual information
+    ``H[E_w p_c] - E_w[H[p_c]]`` (labels are independent Bernoullis)."""
+    return pred_entropy_multilabel(logits) - exp_entropy_multilabel(logits)
 
 
 def acq_from_batch(

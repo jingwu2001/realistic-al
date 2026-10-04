@@ -27,8 +27,8 @@ End-to-end flow: STraTS pickle → offline preprocessing → `.npy` files →
 Input is the pickle written by STraTS's `preprocess_mimic_iii_large.py`: a
 5-tuple of an **event dataframe** (`ts_id, minute, variable, value` — one row
 per observation), an **outcomes dataframe** (`ts_id, in_hospital_mortality`),
-and train/val/test id arrays (used only to enumerate stays; the AL framework
-re-splits later). Steps, replicating STraTS's `model_type='sand'` branch:
+and train/val/test id arrays (**reused** as the fixed split — see step 6/7).
+Steps, replicating STraTS's `model_type='sand'` branch:
 
 1. Keep events with `0 <= minute <= 1440` (first 24h); fix `Age > 200 → 91.4`
    (MIMIC's anonymised ages).
@@ -39,24 +39,30 @@ re-splits later). Steps, replicating STraTS's `model_type='sand'` branch:
    binary `obs` mask.
 5. `delta` = bins since the last observation (STraTS recursion
    `δ_t = (1-o_t)(1+δ_{t-1})`, reset to 0 when observed), divided by T.
-6. Mean-fill unobserved values with the per-variable mean of observed entries,
-   then z-normalise each variable over all `(N, T)` cells. Stats come from the
-   **full dataset** — see deviation 1 below.
-7. `X = concat([values, obs, delta], axis=-1)` → `(44812, 24, 387)` float32,
-   saved with `demo.npy`, `targets.npy`, `subject_ids.npy` (per-stay patient id
-   for patient-grouped splitting), and `meta.json` (variable names, dims,
-   channel layout, `n_patients`) to `$DATA_ROOT/mimic3_sand/`.
+6. **Fixed split, reusing STraTS's ids.** STraTS's `train`+`val` ids become one
+   `train` object, its `test` ids the fixed `test` object. Two cohorts are
+   emitted: `all` (44,812 stays) and `single_stay` (26,609 — patients with
+   exactly one ICU stay; the split is filtered to them, which preserves the
+   64/16/20 ratio since STraTS splits by patient). Mean-fill + per-variable
+   z-normalisation stats are computed over **each cohort's `train` object only**
+   (train+val, not test) — the CIFAR convention, and it fixes the old full-data
+   leakage. The demo matrix is z-normalised the same way.
+7. `X = concat([values, obs, delta], axis=-1)` → `(n, 24, 387)` float32, saved
+   per cohort/split as `X/demo/targets/subject_ids.npy` under
+   `$DATA_ROOT/mimic3_sand/{all,single_stay}/{train,test}/`, plus a shared
+   `meta.json` (variable names, dims, channel layout, per-cohort split sizes).
 
 ### 2. Dataset class (`src/data/mimic_dataset.py`)
 
-`MIMIC3SandDataset(root)` loads the three `.npy` files into RAM (~1.7 GB) and
-serves `((ts, demo), label)` with `ts: (24, 387)` float32, `demo: (2,)`
-float32, `label` int. Normalisation is baked in at preprocess time, so there is
-no transform pipeline (the `transform_train/test: basic` keys in the data
-config are inert for this dataset, as for P12). The `targets` attribute (numpy
-int64) is what the datamodule's stratified splitter and `label_balanced` read;
-the `groups` attribute (patient ids from `subject_ids.npy`, or `None` if
-absent) drives the patient-grouped split.
+`MIMIC3SandDataset(root, train=True, single_stay_only=False)` selects one of
+the four pre-split objects (CIFAR-style): `train`/`test` × `all`/`single_stay`.
+It loads that object's `.npy` files and serves `((ts, demo), label)` with
+`ts: (24, 387)` float32, `demo: (2,)` float32, `label` int. Normalisation is
+baked in at preprocess time, so there is no transform pipeline (the
+`transform_train/test: basic` keys are inert, as for P12). The `targets`
+attribute (numpy int64) feeds `label_balanced` and the per-seed validation
+carve; `groups` (patient ids from `subject_ids.npy`) drives the patient-grouped
+val carve. The test object is fixed across seeds — the point of the pre-split.
 
 ### 3. Datamodule (`src/data/timeseriesdata.py::TimeSeriesDM`)
 
@@ -64,23 +70,17 @@ absent) drives the patient-grouped split.
 `mimic3_sand` is in its `time_series_datasets` set; the dataset name comes from
 `cfg.data.name`. Inside `_setup_datasets`:
 
-- **Split** — `_grouped_stratified_3way_split`, seeded by `trainer.seed` (a
-  different split every seed): test = 10% of N, val = `val_split` fraction
-  (0.1), the remainder is the AL pool. Splitting is at the **patient**
-  (`SUBJECT_ID`) level, not the stay level: all ICU stays of a patient land in
-  the same split, so no patient leaks across train/val/test (44,812 stays come
-  from 33,395 patients; 8,324 have >1 stay and 1,312 have mixed mortality
-  labels across stays). This mirrors STraTS's reference split
-  (`preprocess_mimic_iii_large.py`), which groups by `SUBJECT_ID` — but STraTS
-  fixes `np.random.seed(0)` once at preprocess time, whereas here the split is
-  redrawn per `trainer.seed`. The split targets positive/negative *sample*
-  counts (base-rate proportions by default, 50/50 with `balanced_test_val`);
-  positives can only enter via a positive patient (who may drag a few negative
-  stays along), and negatives are topped up from negative-only patients, so
-  realised sizes/ratios are approximate. Verified: test/val hit ~11.5% (natural)
-  or ~50.0% (baleval) positive with zero patient leakage.
-  `MIMIC3SandDataset.groups` (from `subject_ids.npy`) carries the patient ids;
-  P12 has no `groups`, so it still uses the plain `_stratified_3way_split`.
+- **Split** — mimic3_sand has its own branch (separate from P12/ECG5000). The
+  **test object is fixed** (STraTS's test cohort, identical across seeds); only
+  the **validation set is carved per seed** from the `train` object via
+  `_grouped_val_pool_split` (patient-grouped, seeded by `trainer.seed`), the
+  remainder being the AL pool. `val_split` (0.1) is the val fraction *of the
+  train object*. `balanced_test_val` balances the eval sets by downsampling the
+  majority class (`_balanced_indices`). This removes the old per-seed test
+  resampling — the dominant cross-seed AUPRC variance source (seeds used to
+  evaluate on ~90%-disjoint test cohorts). See
+  [mimic3_sand_strats_comparison.md](mimic3_sand_strats_comparison.md). P12 and
+  ECG5000 still use the runtime `_stratified_3way_split` / grouped 3-way split.
 - **Consequence of balanced eval**: MIMIC has only ~5,150 positives, and the
   balanced eval sets consume 4,480 of them, so the remaining pool of 35,852 is
   ~1.9% positive — far more imbalanced than the natural 11.5%. (Same mechanism
@@ -93,8 +93,8 @@ absent) drives the patient-grouped split.
   `.pool` views drive the labelled and pool dataloaders. Because MIMIC/P12
   normalise internally, the wrapper is built **without** `pool_specifics`
   (no train→test transform swap on the pool, unlike the image datasets).
-- **Eval sets** — a second full dataset instance is built and val/test are
-  `Subset`s of it (so the process holds two copies of X, ~3.4 GB total).
+- **Eval sets** — val is a `Subset` of the `train` object (via the carved val
+  indices); test is a `Subset` of the separate, smaller `test` object.
 - **Loaders** — the train loader oversamples the labelled set to
   `active.min_train` (100) samples per epoch via `RandomFixedLengthSampler`
   (or `WeightedRandomSampler` if `data.balanced_sampling=true`), so "an epoch"
@@ -127,8 +127,8 @@ iterations trains a **fresh** model and queries:
 
 | File | What it is |
 |---|---|
-| `src/data/preprocess_mimic3_sand.py` | One-time converter: STraTS `mimic_iii.pkl` → `$DATA_ROOT/mimic3_sand/{X,demo,targets,subject_ids}.npy` + `meta.json`. Replicates STraTS's SAND pipeline (24h filter, Age>200 fix, hourly binning, delta channel, mean-fill, z-norm) and emits per-stay `SUBJECT_ID` for patient-grouped splitting. |
-| `src/data/mimic_dataset.py` | `MIMIC3SandDataset` — loads the `.npy` files, exposes `.targets` for stratification and `.groups` (patient ids) for patient-grouped splitting (P12 pattern). |
+| `src/data/preprocess_mimic3_sand.py` | One-time converter: STraTS `mimic_iii.pkl` → four pre-split objects `$DATA_ROOT/mimic3_sand/{all,single_stay}/{train,test}/{X,demo,targets,subject_ids}.npy` + shared `meta.json`. Reuses STraTS's patient-grouped split (train+val vs test); train-only normalisation per cohort. |
+| `src/data/mimic_dataset.py` | `MIMIC3SandDataset(root, train, single_stay_only)` — CIFAR-style selector of the four objects; exposes `.targets` and `.groups` (patient ids) for the per-seed val carve. |
 | `src/models/networks/bayesian_sand.py` | `BayesianSANDModel` + ported SAND blocks (`MultiHeadAttention`, conv `FeedForward`, `TransformerBlock`, `DenseInterpolation`). Deterministic backbone; `ConsistentMCDropout` + linear head only (repo convention). Feature dim = `hid_dim*M + hid_dim` = 832. |
 | `src/models/networks/sand.py` | Registry entry `sand` (filename-keyed, per repo pattern). |
 | `src/config/model/sand.yaml` | Defaults follow the STraTS MIMIC run: hid_dim 64, 4 layers, 4 heads, r 24, M 12, dropout 0.2, lr 5e-4. |
@@ -150,12 +150,10 @@ iterations trains a **fresh** model and queries:
 
 ## Decisions & deviations (and why)
 
-1. **Full-data normalisation stats** (not STraTS's train-split stats): the AL
-   framework re-splits stratified per seed, so no fixed train split exists at
-   preprocess time. This matches the existing P12 convention but *not* CIFAR
-   (fixed published train-set constants) or STraTS. Mild feature-scale leakage;
-   the principled fix would be pool-only stats computed inside the datamodule
-   after the split, applied to P12 too.
+1. **Train-only normalisation stats** (per cohort, computed at preprocess time
+   over STraTS's fixed train+val): matches the CIFAR convention and STraTS, and
+   removes the earlier full-dataset leakage. (P12 still uses its full-data
+   stats; the same fix could be applied there.)
 2. **Attention-dropout bug fixed in the port**: STraTS's `modeling_sand.py`
    calls `F.dropout(A, p)` without the `training` flag, so attention dropout
    stayed active at eval. The port passes `self.training` — required for the
@@ -212,6 +210,6 @@ python src/data/preprocess_mimic3_sand.py \
 
 ## Open items
 
-- Optional: pool-only normalisation inside the datamodule (fixes the mild
-  leakage for both MIMIC and P12).
+- Done for MIMIC: train-only normalisation via the fixed pre-split. P12 still
+  uses full-data stats — apply the same fix there if needed.
 - Optional: set `query.bandit.num_classes=2` in the P12 launchers.

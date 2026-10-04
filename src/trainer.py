@@ -13,10 +13,12 @@ from omegaconf import DictConfig
 from pytorch_lightning.callbacks import TQDMProgressBar
 
 from data.data import TorchVisionDM
+from data.mimic_dataset import PHENO_CONDITION_NAMES, PHENO_NUM_CLASSES, pheno_single_task_id
 from models.bayesian import BayesianModule
 from models.callbacks.metrics_callback import (
     ImbClassMetricCallback,
     ISIC2016MetricCallback,
+    MultiLabelMetricCallback,
 )
 from query import QuerySampler, BanditQuerySampler
 from utils.io import save_json
@@ -66,6 +68,15 @@ class ActiveTrainingLoop(object):
                 # linear-weighted Cohen's kappa (robust to class imbalance).
                 monitor = "val/kappa"
                 mode = "max"
+            elif self.cfg.data.name == "mimic3_pheno":
+                # phenotyping: 25-label multi-label task, selected on the headline
+                # macro-averaged AUROC (Harutyunyan et al. benchmark metric);
+                # single-task mode (one condition) on that condition's AUROC.
+                if pheno_single_task_id(self.cfg.data) is None:
+                    monitor = "val/macro_auroc"
+                else:
+                    monitor = "val/auroc"
+                mode = "max"
             elif self.cfg.data.name in ("p12", "p12_transformer", "mimic3_sand"):
                 monitor = "val/auroc"
                 mode = "max"
@@ -98,7 +109,22 @@ class ActiveTrainingLoop(object):
             callbacks.append(pl.callbacks.EarlyStopping("val/acc", mode="max"))
         if self.cfg.data.name == "isic2016":
             callbacks.append(ISIC2016MetricCallback())
-        if self.cfg.data.name in ["isic2019", "miotcd", "ecg5000", "p12", "p12_transformer", "mimic3_sand", "mimic3_los"]:
+        if self.cfg.data.name == "mimic3_pheno":
+            # multi-label phenotyping: macro/micro AUROC, macro AUPRC, macro F1,
+            # plus per-condition acc/auroc/auprc/f1 (-> al/phenotype/* subtab).
+            # Single-task: binary auroc/auprc/f1 for data.task_id only.
+            task_id = pheno_single_task_id(self.cfg.data)
+            label_ids = (
+                list(range(PHENO_NUM_CLASSES)) if task_id is None else [task_id]
+            )
+            callbacks.append(
+                MultiLabelMetricCallback(
+                    num_classes=len(label_ids),
+                    label_names=[PHENO_CONDITION_NAMES[i] for i in label_ids],
+                    label_ids=label_ids,
+                )
+            )
+        elif self.cfg.data.name in ["isic2019", "miotcd", "ecg5000", "p12", "p12_transformer", "mimic3_sand", "mimic3_los"]:
             callbacks.append(
                 ImbClassMetricCallback(num_classes=self.cfg.data.num_classes)
             )

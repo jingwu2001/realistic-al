@@ -41,6 +41,10 @@ class AbstractClassifier(pl.LightningModule):
         self.acc_test = None
         self.bacc_test = None  # balanced accuracy (macro recall)
 
+        # Multi-label mode (25-condition MIMIC phenotyping): sigmoid/BCE instead
+        # of softmax/NLL. Set by the concrete module from cfg.data.multilabel.
+        self.multilabel = False
+
         self.loss_fct = nn.NLLLoss()
 
     def forward(
@@ -71,14 +75,26 @@ class AbstractClassifier(pl.LightningModule):
         return out
 
     def mc_nll(self, logits: torch.Tensor) -> torch.Tensor:
-        """Computs mean logits as required for predictive entropy
+        """Aggregate MC-sampled logits into the predictive distribution.
+
+        Single-label: log-softmax over classes, then MC-marginalise via
+        ``logsumexp(dim=1) - log(k)`` (a categorical predictive).
+        Multi-label: per-label sigmoid MC-marginalised in probability space,
+        returning Bernoulli probabilities ``(B, C)`` (NOT log-probs). The
+        multi-label training/eval loss path (``step``) uses raw logits
+        directly, so this branch is only for the ``agg=True`` predictive.
 
         Args:
-            logits (torch.Tensor): logits
+            logits (torch.Tensor): logits, ``(B, k, C)`` or ``(B, C)``.
 
         Returns:
-            torch.Tensor: NLL
+            torch.Tensor: predictive log-probs (single-label) / probs (multi-label).
         """
+        if self.multilabel:
+            p = torch.sigmoid(logits)
+            if len(logits.shape) > 2:
+                p = p.mean(dim=1)  # MC-marginal Bernoulli, (B, C)
+            return p
         out = torch.log_softmax(logits, dim=-1)
         if len(logits.shape) > 2:
             k = out.shape[1]
@@ -148,6 +164,21 @@ class AbstractClassifier(pl.LightningModule):
             Tuple[torch.tensor, torch.tensor, torch.tensor, torch.tensor]: loss, logprob, predictions, labels
         """
         x, y = batch
+        if self.multilabel:
+            # Raw logits (B,k,C) or (B,C); BCE-with-logits per label.
+            logits = self.forward(x, k=k, agg=False)
+            y_float = y.float()
+            if logits.dim() == 3:
+                b, kk, c = logits.shape
+                loss = self.loss_fct(logits, y_float.unsqueeze(1).expand(b, kk, c))
+                probs = torch.sigmoid(logits).mean(dim=1)  # (B,C) MC-marginal
+            else:
+                loss = self.loss_fct(logits, y_float)
+                probs = torch.sigmoid(logits)  # (B,C)
+            preds = (probs > 0.5).long()
+            # Return probs in the "logprob" slot (the multi-label metric callback
+            # reads it as sigmoid probs); y as int multi-hot for metrics.
+            return loss, probs, preds, y.long()
         logprob = self.forward(x, k=k)
         loss = self.loss_fct(logprob, y)
         preds = torch.argmax(logprob, dim=1)
@@ -289,17 +320,29 @@ class AbstractClassifier(pl.LightningModule):
                     classes.append(y.numpy())
                 classes = np.concatenate(classes)
 
-            present_classes, class_counts = np.unique(classes, return_counts=True)
-            num_classes = getattr(dm, "num_classes", None)
-            if num_classes is None:
-                num_classes = self.hparams.data.num_classes
-            # computation identical to sklearn balanced class weights
-            # https://github.com/scikit-learn/scikit-learn/blob/36958fb24/sklearn/utils/class_weight.py#L10
-            # Build weight vector over all classes; absent classes get weight 0
-            all_weights = np.zeros(num_classes, dtype=np.float64)
-            all_weights[present_classes] = np.sum(class_counts) / (len(present_classes) * class_counts)
-            class_weights = torch.tensor(all_weights, dtype=torch.float)
-            self.loss_fct = nn.NLLLoss(weight=class_weights)
+            if self.multilabel:
+                # Per-label BCE pos_weight = #neg / #pos over the labelled set
+                # (the standard multi-label imbalance correction). Absent
+                # positives -> weight 1 (no up-weighting, no inf).
+                labels = np.asarray(classes)  # (n, C) multi-hot
+                pos = labels.sum(axis=0)
+                neg = labels.shape[0] - pos
+                pos_weight = np.where(pos > 0, neg / np.maximum(pos, 1.0), 1.0)
+                self.loss_fct = nn.BCEWithLogitsLoss(
+                    pos_weight=torch.tensor(pos_weight, dtype=torch.float)
+                )
+            else:
+                present_classes, class_counts = np.unique(classes, return_counts=True)
+                num_classes = getattr(dm, "num_classes", None)
+                if num_classes is None:
+                    num_classes = self.hparams.data.num_classes
+                # computation identical to sklearn balanced class weights
+                # https://github.com/scikit-learn/scikit-learn/blob/36958fb24/sklearn/utils/class_weight.py#L10
+                # Build weight vector over all classes; absent classes get weight 0
+                all_weights = np.zeros(num_classes, dtype=np.float64)
+                all_weights[present_classes] = np.sum(class_counts) / (len(present_classes) * class_counts)
+                class_weights = torch.tensor(all_weights, dtype=torch.float)
+                self.loss_fct = nn.NLLLoss(weight=class_weights)
 
         # Lazily initialize metrics once num_classes is available.
         if self.acc_train is None:
@@ -307,12 +350,26 @@ class AbstractClassifier(pl.LightningModule):
             if num_classes is None:
                 # fallback to hparams if datamodule does not expose it
                 num_classes = self.hparams.data.num_classes
-            task = "multiclass"
-            self.acc_train = Accuracy(task=task, num_classes=num_classes)
-            self.acc_val = Accuracy(task=task, num_classes=num_classes)
-            self.acc_test = Accuracy(task=task, num_classes=num_classes)
-            # balanced accuracy = macro-averaged per-class recall
-            self.bacc_test = MulticlassRecall(num_classes=num_classes, average="macro")
+            if self.multilabel:
+                # Per-label (subset) accuracy as a light sanity metric; the real
+                # phenotyping metrics come from MultiLabelMetricCallback.
+                # One label (single-task phenotyping): torchmetrics' multilabel
+                # metrics need >= 2 labels, so use the equivalent binary one.
+                kwargs = (
+                    dict(task="binary") if num_classes == 1
+                    else dict(task="multilabel", num_labels=num_classes)
+                )
+                self.acc_train = Accuracy(**kwargs)
+                self.acc_val = Accuracy(**kwargs)
+                self.acc_test = Accuracy(**kwargs)
+                self.bacc_test = None  # balanced multiclass recall is undefined
+            else:
+                task = "multiclass"
+                self.acc_train = Accuracy(task=task, num_classes=num_classes)
+                self.acc_val = Accuracy(task=task, num_classes=num_classes)
+                self.acc_test = Accuracy(task=task, num_classes=num_classes)
+                # balanced accuracy = macro-averaged per-class recall
+                self.bacc_test = MulticlassRecall(num_classes=num_classes, average="macro")
 
     def configure_optimizers(
         self,

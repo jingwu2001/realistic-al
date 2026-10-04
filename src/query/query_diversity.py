@@ -300,13 +300,27 @@ def get_grad_embedding(
                 l1 = model.model.classifier[:-1](features)
             outputs = model.model.classifier(features)
 
-            if use_true_labels:
-                # ground-truth labels (labeled set)
-                targets = y.to(device).long()
+            if getattr(model, "multilabel", False):
+                # Multi-label (25-condition phenotyping): the last layer Linear(Z->C)
+                # has a C x Z weight-gradient = C per-label 1xZ vectors. The BCE
+                # gradient w.r.t. the logits is (sigmoid(outputs) - y_hat), so only
+                # the error term changes vs single-label; the C*Z outer-product
+                # embedding below (l0 (x) l1) is identical in shape/structure to the
+                # softmax BADGE embedding, just with a Bernoulli error vector.
+                if use_true_labels:
+                    targets = y.to(device).float()  # (B, C) multi-hot
+                else:
+                    # multi-hot pseudo-label (sigmoid > 0.5), BADGE convention.
+                    targets = (torch.sigmoid(outputs) > 0.5).float()
+                loss = F.binary_cross_entropy_with_logits(outputs, targets, reduction="sum")
             else:
-                # hard argmax pseudo-labels (unlabeled pool, BADGE convention)
-                targets = torch.argmax(outputs, dim=1)
-            loss = F.cross_entropy(outputs, targets, reduction="sum")
+                if use_true_labels:
+                    # ground-truth labels (labeled set)
+                    targets = y.to(device).long()
+                else:
+                    # hard argmax pseudo-labels (unlabeled pool, BADGE convention)
+                    targets = torch.argmax(outputs, dim=1)
+                loss = F.cross_entropy(outputs, targets, reduction="sum")
             l0_grads = torch.autograd.grad(loss, outputs)[0]  # B x C, patial L / partial z_i = p_i - \delta_iy
 
             # Calculate the linear layer gradients as well if needed

@@ -47,12 +47,19 @@ Normalisation / mean-fill statistics are computed over each cohort's ``train``
 object only (train+val), not the test set -- the CIFAR convention (fixed
 constants from the training set), which also avoids test leakage.
 
+Each object also carries a 25-condition multi-hot phenotype label
+(``phenotype.npy``, Harutyunyan et al. 2019 / mimic3-benchmarks HCUP CCS 2015
+groups) joined back from raw MIMIC-III ``DIAGNOSES_ICD.csv`` via
+``ts_id (ICUSTAY_ID) -> HADM_ID (from oc) -> ICD9_CODE -> CCS group``, plus the
+per-row ``icustay_ids.npy`` (provenance). Read by ``MIMIC3PhenotypeDataset``.
+
 Output layout (written under <out>/):
-  all/train/{X,demo,mortality,los,subject_ids}.npy
-  all/test/{X,demo,mortality,los,subject_ids}.npy
+  all/train/{X,demo,mortality,los,phenotype,subject_ids,icustay_ids}.npy
+  all/test/{X,demo,mortality,los,phenotype,subject_ids,icustay_ids}.npy
   single_stay/train/{...}.npy
   single_stay/test/{...}.npy
-  meta.json   (variable names, static names, T, V, per-cohort split sizes)
+  meta.json   (variable names, static names, T, V, per-cohort split sizes,
+               phenotype_conditions)
 
 Usage:
   conda run -n real-al python src/data/preprocess_mimic3_sand.py \
@@ -70,8 +77,23 @@ import pickle
 
 import numpy as np
 import pandas as pd
+import yaml
 
 STATIC_VARIS = ["Age", "Gender"]
+
+# Default location of the HCUP CCS 2015 definitions shipped with the vendored
+# Harutyunyan benchmark (third_party/mimic3-benchmarks). 25 groups carry
+# use_in_benchmark: True -- the phenotyping label set.
+DEFAULT_PHENO_DEFS = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "third_party",
+    "mimic3-benchmarks",
+    "mimic3benchmark",
+    "resources",
+    "hcup_ccs_2015_definitions.yaml",
+)
 
 # Harutyunyan et al. MIMIC-III benchmark length-of-stay buckets (days), kept
 # here purely as the canonical reference recorded in meta.json. los.npy stores
@@ -102,13 +124,88 @@ def normalise_cohort(values_raw, obs, demo_raw, train_idx):
     return values, demo
 
 
-def save_object(out_dir, X, demo, mortality, los, sid):
+def _add_hcup_ccs_2015_groups(diagnoses, definitions):
+    """Map ``ICD9_CODE`` -> HCUP CCS 2015 group name + benchmark flag.
+
+    Replicated verbatim from the vendored Harutyunyan benchmark
+    (``third_party/mimic3-benchmarks/mimic3benchmark/preprocessing.py``
+    ``add_hcup_ccs_2015_groups``) so we don't have to import that package
+    (its ``__init__`` eagerly pulls the whole benchmark chain). ``definitions``
+    is the parsed ``hcup_ccs_2015_definitions.yaml`` dict.
+    """
+    def_map = {}
+    for dx in definitions:
+        for code in definitions[dx]["codes"]:
+            def_map[code] = (dx, definitions[dx]["use_in_benchmark"])
+    diagnoses["HCUP_CCS_2015"] = diagnoses.ICD9_CODE.apply(
+        lambda c: def_map[c][0] if c in def_map else None
+    )
+    diagnoses["USE_IN_BENCHMARK"] = diagnoses.ICD9_CODE.apply(
+        lambda c: int(def_map[c][1]) if c in def_map else None
+    )
+    return diagnoses
+
+
+def build_phenotype_matrix(oc, diagnoses_csv, definitions_path, all_ids):
+    """Build a ``(N, 25)`` multi-hot phenotype label matrix in ``all_ids`` order.
+
+    Label definition follows Harutyunyan et al. 2019 (mimic3-benchmarks): the 25
+    HCUP CCS 2015 groups with ``use_in_benchmark: True``. Join path uses keys
+    already in hand at preprocess time::
+
+        ts_id (== ICUSTAY_ID) --HADM_ID (from oc)--> ICD9_CODE (DIAGNOSES_ICD)
+            --> HCUP CCS 2015 group --> 25 benchmark conditions
+
+    All ICU stays in an admission inherit that admission's diagnosis codes
+    (matches the benchmark's ``filter_diagnoses_on_stays``). Stays whose
+    admission has none of the 25 conditions get a valid all-zero row.
+
+    Returns ``(phenotype (N, 25) int8, condition_names list[str])`` where
+    ``condition_names`` is the canonical alphabetical order (matches the
+    benchmark listfile header) and rows are in ``all_ids`` order (1:1 with X).
+    """
+    definitions = yaml.safe_load(open(definitions_path))
+    condition_names = sorted(
+        [k for k, v in definitions.items() if v.get("use_in_benchmark")]
+    )
+    assert (
+        len(condition_names) == 25
+    ), f"expected 25 benchmark conditions, got {len(condition_names)}"
+
+    # ICD9_CODE MUST be read as str: leading zeros are significant and match the
+    # YAML code strings (e.g. "0031"). DIAGNOSES_ICD ships here uncompressed.
+    dx = pd.read_csv(
+        diagnoses_csv, usecols=["HADM_ID", "ICD9_CODE"], dtype={"ICD9_CODE": str}
+    ).dropna(subset=["HADM_ID", "ICD9_CODE"])
+    dx["HADM_ID"] = dx["HADM_ID"].astype(np.int64)
+
+    # ts_id (ICUSTAY_ID) <-> HADM_ID bridge from the STraTS outcomes frame.
+    bridge = oc[["ts_id", "HADM_ID"]].drop_duplicates().copy()
+    bridge["HADM_ID"] = bridge["HADM_ID"].astype(np.int64)
+    dx = dx.merge(bridge, on="HADM_ID", how="inner").rename(
+        columns={"ts_id": "ICUSTAY_ID"}
+    )
+
+    dx = _add_hcup_ccs_2015_groups(dx, definitions)
+    dx = dx.loc[dx.USE_IN_BENCHMARK > 0, ["ICUSTAY_ID", "HCUP_CCS_2015"]].drop_duplicates()
+    dx["VALUE"] = 1
+    mat = dx.pivot(index="ICUSTAY_ID", columns="HCUP_CCS_2015", values="VALUE")
+    # Guarantee all 25 columns (canonical order) and all N rows (all_ids order).
+    mat = mat.reindex(columns=condition_names).reindex(index=all_ids)
+    phenotype = mat.fillna(0).astype(np.int8).to_numpy()
+    return phenotype, condition_names
+
+
+def save_object(out_dir, X, demo, mortality, los, sid, phenotype, icustay_ids):
     os.makedirs(out_dir, exist_ok=True)
     np.save(os.path.join(out_dir, "X.npy"), X.astype(np.float32))
     np.save(os.path.join(out_dir, "demo.npy"), demo.astype(np.float32))
     np.save(os.path.join(out_dir, "mortality.npy"), mortality.astype(np.int64))
     np.save(os.path.join(out_dir, "los.npy"), los.astype(np.float32))
     np.save(os.path.join(out_dir, "subject_ids.npy"), sid.astype(np.int64))
+    # 25-condition multi-hot phenotype labels + per-row ICUSTAY_ID (provenance).
+    np.save(os.path.join(out_dir, "phenotype.npy"), phenotype.astype(np.int8))
+    np.save(os.path.join(out_dir, "icustay_ids.npy"), icustay_ids.astype(np.int64))
     # Remove the pre-LOS filename if this dir was written by an older run, so a
     # stale mortality-only label can't be mistaken for the current one.
     stale = os.path.join(out_dir, "targets.npy")
@@ -127,6 +224,17 @@ def main() -> None:
         "--icustays",
         default="/mnt/physionet.org/files/mimiciii/1.4/ICUSTAYS.csv.gz",
         help="Path to raw MIMIC-III ICUSTAYS.csv.gz (source of the LOS label)",
+    )
+    parser.add_argument(
+        "--diagnoses",
+        default="/mnt/physionet.org/files/mimiciii/1.4/DIAGNOSES_ICD.csv",
+        help="Path to raw MIMIC-III DIAGNOSES_ICD.csv (source of phenotype "
+        "labels; note it ships uncompressed .csv here, not .csv.gz)",
+    )
+    parser.add_argument(
+        "--phenotype-definitions",
+        default=DEFAULT_PHENO_DEFS,
+        help="HCUP CCS 2015 definitions YAML (25 benchmark phenotype conditions)",
     )
     parser.add_argument(
         "--out",
@@ -175,6 +283,24 @@ def main() -> None:
         f"max {los.max():.2f}"
     )
 
+    # --- Phenotype label: 25-condition multi-hot (Harutyunyan/mimic3-benchmarks). ---
+    # oc carries ts_id (== ICUSTAY_ID) and HADM_ID; diagnoses are keyed on
+    # HADM_ID. Built in all_ids_from_strats_split order, so rows align 1:1 with
+    # y / subject_ids / los / X below.
+    print(f"Building phenotype labels from {args.diagnoses} ...")
+    phenotype, condition_names = build_phenotype_matrix(
+        oc, args.diagnoses, args.phenotype_definitions, all_ids_from_strats_split
+    )
+    icustay_ids = all_ids_from_strats_split.astype(np.int64)
+    assert phenotype.shape == (N, 25)
+    print(
+        f"Phenotype {phenotype.shape}: mean {phenotype.sum(1).mean():.2f} "
+        f"conditions/stay, {(phenotype.sum(1) == 0).mean():.3f} all-negative. "
+        f"Per-condition prevalence:"
+    )
+    for name, rate in zip(condition_names, phenotype.mean(0)):
+        print(f"    {rate:5.3f}  {name}")
+
     # --- 2. static variables -> demo (N, 2), RAW (z-norm applied per cohort) ---
     static_mask = data.variable.isin(STATIC_VARIS)
     static_data = data.loc[static_mask]
@@ -219,6 +345,7 @@ def main() -> None:
     meta_splits = {}
     for cohort_name, cidx in cohorts.items():
         c_labels, c_groups, c_los = y[cidx], subject_ids[cidx], los[cidx]
+        c_pheno, c_icustay = phenotype[cidx], icustay_ids[cidx]
         c_is_test = is_test[cidx]
         rel_train = np.where(~c_is_test)[0]  # STraTS train+val
         rel_test = np.where(c_is_test)[0]    # STraTS test
@@ -232,6 +359,7 @@ def main() -> None:
             save_object(
                 os.path.join(args.out, cohort_name, split_name),
                 c_X[rel], c_demo[rel], c_labels[rel], c_los[rel], c_groups[rel],
+                c_pheno[rel], c_icustay[rel],
             )
         meta_splits[cohort_name] = {
             "n_train": int(len(rel_train)),
@@ -258,6 +386,9 @@ def main() -> None:
                 "los_unit": "days",
                 "los_bin_edges": LOS_BIN_EDGES,
                 "los_num_classes": len(LOS_BIN_EDGES) + 1,
+                "phenotype_conditions": condition_names,
+                "n_conditions": len(condition_names),
+                "phenotype_source": "harutyunyan hcup_ccs_2015 (25 use_in_benchmark groups)",
                 "split_source": "strats (train+val vs test)",
                 "splits": meta_splits,
             },

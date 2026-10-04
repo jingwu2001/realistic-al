@@ -1,9 +1,33 @@
-from typing import Any, Dict
+import re
+from typing import Any, Dict, List, Optional
 
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning import Callback
 from torchmetrics import AUROC, AveragePrecision, ConfusionMatrix
+from torchmetrics.classification import (
+    BinaryAccuracy,
+    BinaryAUROC,
+    BinaryAveragePrecision,
+    BinaryF1Score,
+    MultilabelAccuracy,
+    MultilabelAUROC,
+    MultilabelAveragePrecision,
+    MultilabelF1Score,
+)
+
+
+def _label_token(idx: int, name: Optional[str]) -> str:
+    """Compact, wandb-safe per-label key: ``NN`` prefix + slugged condition name.
+
+    The zero-padded index keeps tokens ordered and unique even if two slugs
+    collide or truncate to the same text; ``name=None`` falls back to
+    ``cls_NN``. e.g. ``08_congestive_heart_failure_nonhyperte``.
+    """
+    if name is None:
+        return f"cls_{idx:02d}"
+    slug = re.sub(r"[^0-9a-zA-Z]+", "_", name).strip("_").lower()[:32].strip("_")
+    return f"{idx:02d}_{slug}"
 
 
 def weighted_cohen_kappa(conf_mat: torch.Tensor, weights: str = "linear") -> torch.Tensor:
@@ -275,6 +299,166 @@ class ImbClassMetricCallback(MetricCallback):
         probs = torch.exp(logprob)
         self.update_metric_dict(self.pred_conf, mode, pred.to("cpu"), y.to("cpu"))
         self.update_metric_dict(self.auc_dict, mode, probs[:, 1] if self.binary else probs, y)
+
+
+class MultiLabelMetricCallback(MetricCallback):
+    # per-label metrics are only tracked for these modes (train is too noisy on
+    # the small labelled set to be worth 25x the columns).
+    PERLABEL_MODES = ("val", "test")
+
+    def __init__(
+        self,
+        num_classes: int,
+        label_names: Optional[List[str]] = None,
+        label_ids: Optional[List[int]] = None,
+    ):
+        """Multi-label metrics for the MIMIC-III phenotyping task (25 independent
+        Bernoulli conditions, Harutyunyan et al. 2019).
+
+        Consumes **sigmoid probabilities** ``(B, C)`` (the multi-label model's
+        ``step`` returns MC-marginal probs in the ``logprob`` slot) and an int
+        multi-hot target. Headline = **macro-AUROC** (``{mode}/macro_auroc``),
+        the checkpoint monitor; also logs micro-AUROC, macro-AUPRC, macro-F1.
+        No confusion matrix / kappa (undefined for multi-label).
+
+        On top of the macro/micro summaries it also logs **per-label** acc,
+        AUROC, AUPRC and F1 for every one of the ``num_classes`` binary tasks
+        (val + test only), under keys ``{mode}/phenotype/{label}/{metric}``.
+        ``wandb_utils`` routes those into the ``al/phenotype/*`` subtab.
+
+        ``num_classes == 1`` is single-task phenotyping (``data.multitask=false``):
+        one binary condition, so the summaries are the binary ``{mode}/auroc``,
+        ``{mode}/auprc``, ``{mode}/f1`` (torchmetrics' multilabel metrics need
+        >= 2 labels; ``{mode}/auroc`` is the checkpoint monitor). The per-label
+        keys are still logged under the condition's token, so they line up with
+        the same condition's curves in the multi-task runs.
+
+        Args:
+            num_classes (int): number of labels (25 for phenotyping, 1 single-task).
+            label_names (list[str], optional): human-readable condition names,
+                one per label; used only to name the per-label metric keys.
+                ``None`` -> ``cls_00``..``cls_NN``.
+            label_ids (list[int], optional): phenotype.npy column of each label,
+                used as the per-label key's index prefix. Defaults to
+                ``range(num_classes)``; single-task passes ``[task_id]``.
+        """
+        super().__init__()
+        modes = ["train", "val", "test"]
+        self.num_labels = num_classes
+        self.binary = num_classes == 1
+        if label_ids is None:
+            label_ids = list(range(num_classes))
+        if label_names is not None and len(label_names) != num_classes:
+            label_names = None  # length mismatch -> fall back to indices
+        self.label_tokens = [
+            _label_token(label_ids[i], None if label_names is None else label_names[i])
+            for i in range(num_classes)
+        ]
+        # pred_conf / pred_dict are unused for multi-label; keep them empty so the
+        # base epoch hooks (reset/log) iterate over nothing.
+        self.pred_conf = {}
+        self.pred_dict = {}
+        self.auc_dict = {}
+        for mode in modes:
+            if self.binary:
+                self.auc_dict[f"{mode}/auroc"] = BinaryAUROC()
+                self.auc_dict[f"{mode}/auprc"] = BinaryAveragePrecision()
+                self.auc_dict[f"{mode}/f1"] = BinaryF1Score(threshold=0.5)
+                continue
+            self.auc_dict[f"{mode}/macro_auroc"] = MultilabelAUROC(
+                num_labels=num_classes, average="macro"
+            )
+            self.auc_dict[f"{mode}/micro_auroc"] = MultilabelAUROC(
+                num_labels=num_classes, average="micro"
+            )
+            self.auc_dict[f"{mode}/macro_auprc"] = MultilabelAveragePrecision(
+                num_labels=num_classes, average="macro"
+            )
+            self.auc_dict[f"{mode}/macro_f1"] = MultilabelF1Score(
+                num_labels=num_classes, average="macro", threshold=0.5
+            )
+
+        # Per-label metrics (average=None -> a (num_labels,) vector per compute).
+        # Kept in their own dict so the base scalar-logging path never touches
+        # them (it would choke on a length-25 tensor); logged element-wise in
+        # log_metrics below.
+        self.perlabel_dict = {}
+        for mode in self.PERLABEL_MODES:
+            if self.binary:
+                self.perlabel_dict[f"{mode}/auroc"] = BinaryAUROC()
+                self.perlabel_dict[f"{mode}/auprc"] = BinaryAveragePrecision()
+                self.perlabel_dict[f"{mode}/f1"] = BinaryF1Score(threshold=0.5)
+                self.perlabel_dict[f"{mode}/acc"] = BinaryAccuracy(threshold=0.5)
+                continue
+            self.perlabel_dict[f"{mode}/auroc"] = MultilabelAUROC(
+                num_labels=num_classes, average=None
+            )
+            self.perlabel_dict[f"{mode}/auprc"] = MultilabelAveragePrecision(
+                num_labels=num_classes, average=None
+            )
+            self.perlabel_dict[f"{mode}/f1"] = MultilabelF1Score(
+                num_labels=num_classes, average=None, threshold=0.5
+            )
+            self.perlabel_dict[f"{mode}/acc"] = MultilabelAccuracy(
+                num_labels=num_classes, average=None, threshold=0.5
+            )
+
+    def on_validation_epoch_start(self, trainer, pl_module) -> None:
+        super().on_validation_epoch_start(trainer, pl_module)
+        self.reset_metric_dict(self.perlabel_dict, "val")
+
+    def on_test_epoch_start(self, trainer, pl_module) -> None:
+        super().on_test_epoch_start(trainer, pl_module)
+        self.reset_metric_dict(self.perlabel_dict, "test")
+
+    def log_metrics(self, pl_module: pl.LightningModule, mode: str) -> None:
+        """Log per-label acc/auroc/auprc/f1 for every binary task (val+test).
+
+        Called by the base epoch-end hooks after the scalar dicts are logged.
+        Each ``average=None`` metric computes to a (num_labels,) vector, which
+        we scatter into ``{mode}/phenotype/{label}/{metric}`` keys.
+        """
+        if mode not in self.PERLABEL_MODES:
+            return
+        log_dict = {}
+        for key, metric in self.perlabel_dict.items():
+            key_mode, metric_name = key.split("/")
+            if key_mode != mode:
+                continue
+            values = metric.compute().reshape(-1)  # (num_labels,); binary: (1,)
+            for i, token in enumerate(self.label_tokens):
+                log_dict[f"{mode}/phenotype/{token}/{metric_name}"] = values[i]
+        if log_dict:
+            pl_module.log_dict(log_dict, on_epoch=True, on_step=False)
+
+    def _update(self, mode: str, probs: torch.Tensor, y: torch.Tensor) -> None:
+        # torchmetrics multilabel metrics want probs (B,C) float + target int (B,C).
+        probs = probs.detach().to("cpu").float()
+        y = y.detach().to("cpu").int()
+        if self.binary:
+            # (B, 1) -> (B,) for the torchmetrics binary metrics
+            probs, y = probs.reshape(-1), y.reshape(-1)
+        self.update_metric_dict(self.auc_dict, mode, probs, y)
+        # perlabel_dict only holds val/test keys, so a "train" update is a no-op.
+        self.update_metric_dict(self.perlabel_dict, mode, probs, y)
+
+    def on_train_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, unused: int = 0
+    ) -> None:
+        # outputs["logprob"] carries sigmoid probs for the multi-label model.
+        self._update("train", outputs["logprob"], outputs["label"])
+
+    def on_validation_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, unused: int = 0
+    ) -> None:
+        probs, y = outputs
+        self._update("val", probs, y)
+
+    def on_test_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, unused: int = 0
+    ) -> None:
+        probs, y = outputs
+        self._update("test", probs, y)
 
 
 # This code is not used in benchmark, but maybe it is useful for some people.

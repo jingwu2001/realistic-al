@@ -196,7 +196,12 @@ def obtain_data_from_pool(pool: Dataset, indices: Iterable[int]):
         sample = pool[ind]
         data.append(sample[0])
         labels.append(sample[1])
-    labels = torch.tensor(labels, dtype=torch.int).numpy()
+    if isinstance(labels[0], torch.Tensor) and labels[0].ndim > 0:
+        # Multi-label targets (e.g. mimic3_pheno): a (C,) multi-hot vector per
+        # sample -> stack into (acq, C) instead of a scalar tensor.
+        labels = torch.stack(labels, dim=0).to(torch.int).numpy()
+    else:
+        labels = torch.tensor(labels, dtype=torch.int).numpy()
     if isinstance(data[0], (list, tuple)):
         # Tuple-input datasets (e.g. P12 transformer): skip stacking.
         # acq_data is only used for visualization which handles failures gracefully.
@@ -218,7 +223,14 @@ def evaluate_accuracy(model: torch.nn.Module, dataloader: DataLoader, device="cu
             else:
                 x = x.to(device)
             out = model(x)
-            pred = torch.argmax(out, dim=1)
-            correct += (pred.cpu() == y).sum().item()
+            if getattr(model, "multilabel", False):
+                # out are per-label sigmoid probs (B, C); report mean per-label
+                # (Hamming) accuracy since argmax is undefined for multi-label.
+                pred = (out.cpu() > 0.5).int()
+                yy = y.cpu().int()
+                correct += (pred == yy).float().mean(dim=1).sum().item()
+            else:
+                pred = torch.argmax(out, dim=1)
+                correct += (pred.cpu() == y).sum().item()
             counts += y.shape[0]
     return correct / counts
