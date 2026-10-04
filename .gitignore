@@ -169,5 +169,7 @@ analysis/plots_simple/
 
 # local-only artifacts (not repo material)
 wandb/
+analysis/wandb_snapshots/
+analysis/cache/
 papers/
 20260408_Nano5_slide.pdf
