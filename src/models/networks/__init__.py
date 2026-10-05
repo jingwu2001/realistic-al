@@ -10,5 +10,7 @@ from .transformer import *
 from .transformer2 import *
 from .bayesian_sand import BayesianSANDModel
 from .sand import *
+from .bayesian_lstm import BayesianLSTMModel
+from .lstm import *
 from .build import build_model
 from .registry import *

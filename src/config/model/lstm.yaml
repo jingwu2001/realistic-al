@@ -1,0 +1,23 @@
+name: lstm
+# --- Architecture: Harutyunyan et al. 2017 MIMIC-III benchmark LSTM, at its
+#     phenotyping setting (mimic3-benchmarks README: --dim 256 --depth 1
+#     --dropout 0.3 --timestep 1.0). See models/networks/bayesian_lstm.py. ---
+d_inp: 387         # time-series input dim per timestep = 3V (the shared SAND tensor)
+d_static: 2        # static features: Age, Gender
+dim: 256           # units of the final LSTM; stacked BiLSTMs use dim//2 per direction
+depth: 1           # total LSTM layers = (depth-1) BiLSTM + 1 LSTM (benchmark ihm: 2)
+use_static: True   # concat the STraTS demo embedding (as SAND does); False = exact benchmark net
+# --- Bayesian ---
+dropout_p: 0.3     # benchmark --dropout: LSTM input dropout + the Dropout before Dense (= MC head)
+k: 10
+# --- Optimiser (benchmark: Adam lr 1e-3, beta_1 0.9, no L1/L2) ---
+weight_decay: 0.0
+learning_rate: 0.001
+# --- Framework flags ---
+use_ema: False
+exclude_bn_bias: False
+small_head: False
+weighted_loss: False
+load_pretrained: Null
+freeze_encoder: False
+finetune: False

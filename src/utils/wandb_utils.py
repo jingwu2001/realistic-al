@@ -226,6 +226,11 @@ def init_wandb(cfg: DictConfig):
         task_id = pheno_single_task_id(cfg.data)
         if task_id is not None:
             data_name = f"{data_name}_t{task_id:02d}"
+    if cfg.data.name.startswith("mimic3") and cfg.model.name != "sand":
+        # SAND is the reference model on the MIMIC tasks and keeps the bare
+        # name; any other model gets its own name/group/tag, e.g.
+        # "mimic3_pheno_t08_lstm", so it never pools with the SAND runs
+        data_name = f"{data_name}_{cfg.model.name}"
 
     # git commit for the session tag; fall back gracefully outside a checkout
     # (e.g. a bare copy on a cluster).

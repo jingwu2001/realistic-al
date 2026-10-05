@@ -208,6 +208,35 @@ python src/data/preprocess_mimic3_sand.py \
   --strats-pkl ~/Desktop/STraTS/data/processed/mimic_iii.pkl --out $DATA_ROOT/mimic3_sand
 ```
 
+## Second model: benchmark LSTM (`model=lstm`, added 2026-10-04)
+
+To check whether query-method rankings hold beyond SAND, `model=lstm` ports the
+LSTM baseline of Harutyunyan et al. 2017 (the MIMIC-III benchmark, Keras source
+in `third_party/mimic3-benchmarks/mimic3models/keras_models/lstm.py`):
+`(depth-1)` BiLSTMs with `dim//2` units per direction, then `LSTM(dim)`, with
+the last hidden state going through `Dropout` and `Dense`. Here the `Dropout`
+is the `ConsistentMCDropout` head, so the backbone is deterministic at eval as
+with SAND. Files: `models/networks/bayesian_lstm.py` (architecture),
+`models/networks/lstm.py` (registry), `config/model/lstm.yaml`.
+
+- **Defaults = the benchmark's phenotyping LSTM:** dim 256, depth 1, dropout
+  0.3, Adam lr 1e-3, no L2, and in the launcher batch 8 and no clipping.
+  Keras init is kept (glorot / orthogonal / forget-gate bias 1).
+- **Same input as SAND**: the (24, 387) values/mask/delta tensor, not the
+  benchmark's 76-dim carry-forward features, so only the architecture differs.
+  `use_static: true` concatenates the STraTS demographics embedding (as SAND
+  and the STraTS GRU baselines do). Set it to `false` for the exact benchmark
+  network, which has no static input.
+- Keras input dropout is ported as one variational mask per sequence, shared
+  across the four gates (Keras draws one mask per gate). `rec_dropout` is not
+  ported because it is 0 in every published benchmark command.
+- wandb: non-SAND models on the `mimic3*` tasks get a `_<model>` suffix on the
+  data name (`mimic3_pheno_t08_lstm`), so they never pool with SAND runs.
+  SAND run names are unchanged.
+- Launcher: `launchers/sweep_exp_mimic3_pheno_single_task_lstm.py` runs the
+  same 7-method single-task grid as SAND (tasks 8/11 × both cohorts × budgets
+  100/500 × 3 seeds = 168 runs). Tests: `tests/test_lstm.py`.
+
 ## Open items
 
 - Done for MIMIC: train-only normalisation via the fixed pre-split. P12 still
