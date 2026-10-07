@@ -24,13 +24,13 @@ config_dict = {
     # plain-vendi runs (~2 min/acquisition vs ~20 s for vendi-q2) don't pile
     # up at the tail
     "query": [
-        "vendi",
-        "vendi-q2",
         "badge",
         "kcentergreedy",
         "bald",
         "entropy",
         "random",
+        "vendi-q2",
+        "vendi",
     ],
     "data": ["mimic3_pheno"],
     "active": ["mimic3_med"],  # random initial labelling (num_iter=10)
@@ -43,7 +43,7 @@ config_dict = {
 hparam_dict = {
     "data.multitask": False,                 # single condition, scalar output
     "data.task_id": [8, 11],                 # phenotype.npy column (0-based)
-    "data.single_stay_only": [False, True],  # sweep both cohorts
+    "data.single_stay_only": [True],  # sweep both cohorts
     "data.balanced_sampling": False,
     "model.weighted_loss": True,             # BCE pos_weight = #neg/#pos (as for SAND)
     "trainer.max_epochs": 50,                # AL protocol, same as SAND
