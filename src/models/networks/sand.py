@@ -18,7 +18,8 @@ def sand(
     """Factory registered under the name ``'sand'``.
 
     Expected config fields (all under ``config.model``):
-      d_inp, T, d_static, hid_dim, num_heads, num_layers, r, M, dropout_p
+      d_inp, T, d_static, hid_dim, num_heads, num_layers, r, M, dropout_p,
+      use_static (optional, default True)
     """
     m = config.model
     return BayesianSANDModel(
@@ -32,4 +33,5 @@ def sand(
         M          = m.M,
         dropout_p  = m.dropout_p,
         n_classes  = num_classes,
+        use_static = getattr(m, "use_static", True),
     )

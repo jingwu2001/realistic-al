@@ -8,6 +8,7 @@ num_heads: 4       # attention heads (must divide hid_dim)
 num_layers: 4      # transformer blocks
 r: 24              # attention band: t attends to t-r..t (24 = full causal)
 M: 12              # dense-interpolation steps -> feature dim hid_dim*M + hid_dim
+use_static: True   # concat the demo (Age, Gender) embedding; False = time series only
 # --- Bayesian ---
 dropout_p: 0.2
 k: 10

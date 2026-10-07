@@ -65,6 +65,40 @@ def test_lstm_bayesian_contract(depth, use_static, num_classes):
     assert all(p.grad is not None for p in model.parameters())
 
 
+@pytest.mark.parametrize("use_static", [True, False])
+def test_sand_use_static(use_static):
+    """SAND with use_static=False is time-series only: features drop the hid_dim
+    demo block and are invariant to the demo input."""
+    torch.manual_seed(0)
+    model_cfg = OmegaConf.load("src/config/model/sand.yaml")
+    model_cfg.update(use_static=use_static)
+    model = build_model(OmegaConf.create({"model": model_cfg}), num_classes=1).eval()
+    ts, demo = _batch()
+    m = model_cfg
+    feats = model.get_features((ts, demo))
+    assert feats.shape == (6, m.hid_dim * m.M + (m.hid_dim if use_static else 0))
+    assert model.classifier.in_features == feats.shape[1]
+    assert hasattr(model, "demo_emb") == use_static
+    same = torch.equal(feats, model.get_features((ts, demo + 1.0)))
+    assert same != use_static, "demo must matter iff use_static"
+    assert model((ts, demo), 10).shape == (6, 10, 1)
+
+
+def test_sand_use_static_default_is_backward_compatible():
+    """Omitting use_static (old configs) builds the original demo-concat SAND,
+    with an identical parameter layout and init stream."""
+    model_cfg = OmegaConf.load("src/config/model/sand.yaml")
+    del model_cfg["use_static"]
+    torch.manual_seed(0)
+    old = build_model(OmegaConf.create({"model": model_cfg}), num_classes=1)
+    model_cfg.use_static = True
+    torch.manual_seed(0)
+    new = build_model(OmegaConf.create({"model": model_cfg}), num_classes=1)
+    sd_old, sd_new = old.state_dict(), new.state_dict()
+    assert list(sd_old) == list(sd_new)
+    assert all(torch.equal(sd_old[k], sd_new[k]) for k in sd_old)
+
+
 def test_lstm_keras_init():
     model = build_model(_cfg(depth=2), num_classes=1)
     for lstm in [*model.bilstms, model.lstm]:
@@ -131,22 +165,30 @@ def test_lstm_grad_embedding_matches_analytic(use_true_labels):
 
 
 @pytest.mark.parametrize(
-    "data_name,model_name,task_id,expected",
+    "data_name,model_name,task_id,use_static,expected",
     [
-        ("mimic3_pheno", "sand", 8, "mimic3_pheno_t08"),       # unchanged
-        ("mimic3_pheno", "lstm", 8, "mimic3_pheno_t08_lstm"),
-        ("mimic3_pheno", "lstm", None, "mimic3_pheno_lstm"),   # multi-task
-        ("mimic3_los", "lstm", None, "mimic3_los_lstm"),
-        ("cifar10", "resnet", None, "cifar10"),                # non-MIMIC untouched
+        ("mimic3_pheno", "sand", 8, None, "mimic3_pheno_t08"),       # unchanged
+        ("mimic3_pheno", "sand", 8, True, "mimic3_pheno_t08"),       # explicit default
+        ("mimic3_pheno", "lstm", 8, None, "mimic3_pheno_t08_lstm"),
+        ("mimic3_pheno", "lstm", None, None, "mimic3_pheno_lstm"),   # multi-task
+        ("mimic3_los", "lstm", None, None, "mimic3_los_lstm"),
+        ("cifar10", "resnet", None, None, "cifar10"),                # non-MIMIC untouched
+        # time-series-only (no demographics) variants
+        ("mimic3_pheno", "sand", 8, False, "mimic3_pheno_t08_nodemo"),
+        ("mimic3_pheno", "lstm", 11, False, "mimic3_pheno_t11_lstm_nodemo"),
+        ("p12_transformer", "transformer2", None, False, "p12_transformer"),  # non-MIMIC untouched
     ],
 )
-def test_wandb_data_name_tags_non_sand_mimic_models(data_name, model_name, task_id, expected):
+def test_wandb_data_name_tags_non_sand_mimic_models(data_name, model_name, task_id, use_static, expected):
     data = {"name": data_name}
     if task_id is not None:
         data.update(multitask=False, task_id=task_id)
+    model = {"name": model_name}
+    if use_static is not None:
+        model["use_static"] = use_static
     cfg = OmegaConf.create({
         "data": data,
-        "model": {"name": model_name},
+        "model": model,
         "query": {"name": "random"},
         "active": {"num_labelled": 100, "acq_size": 100, "num_iter": 10},
         "trainer": {

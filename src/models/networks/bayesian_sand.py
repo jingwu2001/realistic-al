@@ -13,8 +13,8 @@ Architecture (det part):
   num_layers x TransformerBlock with a causal band mask
     (position t attends to positions t-r .. t)
   DenseInterpolation over time -> (B, hid_dim * M)
-  Static/demographic embedding: Linear(D -> 2*hid) + Tanh + Linear(2*hid -> hid)
-  Concatenate -> features of dim hid_dim * M + hid_dim
+  [use_static] Static/demographic embedding: Linear(D -> 2*hid) + Tanh + Linear(2*hid -> hid)
+  Concatenate -> features of dim hid_dim * M + hid_dim (hid_dim * M without use_static)
 
 Stochastic head (same pattern as ResNet / GRU-D / transformers):
   ConsistentMCDropout(dropout_p)
@@ -132,6 +132,8 @@ class BayesianSANDModel(BayesianModule):
         M         : dense-interpolation output steps.
         dropout_p : dropout used in the backbone and the MC head.
         n_classes : number of output classes.
+        use_static: concatenate the demographics embedding to the time-series
+                    features; False = time series only (demo input ignored).
     """
 
     def __init__(
@@ -146,9 +148,11 @@ class BayesianSANDModel(BayesianModule):
         M:          int,
         dropout_p:  float,
         n_classes:  int,
+        use_static: bool = True,
     ) -> None:
         super().__init__()
 
+        self.use_static = use_static
         self.input_embedding = nn.Conv1d(d_inp, hid_dim, 1)
         self.positional_encoding = nn.Parameter(
             torch.empty((1, T, hid_dim)), requires_grad=True
@@ -170,13 +174,14 @@ class BayesianSANDModel(BayesianModule):
         )
         self.dense_interpolation = DenseInterpolation(T, M)
 
-        self.demo_emb = nn.Sequential(
-            nn.Linear(d_static, hid_dim * 2),
-            nn.Tanh(),
-            nn.Linear(hid_dim * 2, hid_dim),
-        )
-
-        d_fi = hid_dim * M + hid_dim
+        d_fi = hid_dim * M
+        if use_static:
+            self.demo_emb = nn.Sequential(
+                nn.Linear(d_static, hid_dim * 2),
+                nn.Tanh(),
+                nn.Linear(hid_dim * 2, hid_dim),
+            )
+            d_fi += hid_dim
         self.d_fi = d_fi
         self.mc_dropout = ConsistentMCDropout(p=dropout_p)
         self.classifier = nn.Linear(d_fi, n_classes)
@@ -224,5 +229,7 @@ class BayesianSANDModel(BayesianModule):
         for layer in self.transformer:
             h = layer(h, self.mask)
         ts_emb = self.dense_interpolation(h)   # (B, hid*M)
+        if not self.use_static:
+            return ts_emb
         demo_emb = self.demo_emb(demo)          # (B, hid)
         return torch.cat((ts_emb, demo_emb), dim=-1)  # (B, hid*M + hid)
