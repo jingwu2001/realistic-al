@@ -231,6 +231,16 @@ def init_wandb(cfg: DictConfig):
         # name; any other model gets its own name/group/tag, e.g.
         # "mimic3_pheno_t08_lstm", so it never pools with the SAND runs
         data_name = f"{data_name}_{cfg.model.name}"
+    d_static_out = cfg.model.get("d_static_out", None)
+    if (
+        cfg.data.name.startswith("mimic3")
+        and cfg.model.get("use_static", True)
+        and d_static_out is not None
+    ):
+        # tanh-bounded LSTM demo embedding (2026-10-09), e.g.
+        # "mimic3_pheno_t08_lstm_demo2". Always suffixed, even at 256: the
+        # earlier runs (no d_static_out key) had a 256-d linear-output embedding
+        data_name = f"{data_name}_demo{d_static_out}"
     if cfg.data.name.startswith("mimic3") and not cfg.model.get("use_static", True):
         # time-series-only variant (no Age/Gender input), e.g.
         # "mimic3_pheno_t08_nodemo", so it never pools with the demo runs

@@ -11,8 +11,8 @@ deep_supervision=False, target_repl=False (the per-stay tasks: ihm, phenotyping)
 Architecture (det part):
   (depth - 1) x Bidirectional LSTM(dim // 2 per direction), returning sequences
   LSTM(dim) -> last hidden state                              (B, dim)
-  [use_static] + demo embedding Linear(D -> 2*dim) + Tanh + Linear(2*dim -> dim)
-  -> features of dim `dim` (+ `dim` with use_static)
+  [use_static] + demo embedding Linear(D -> 2*dim) + Tanh + Linear(2*dim -> d_static_out) + Tanh
+  -> features of dim `dim` (+ `d_static_out` with use_static), all in (-1, 1)
 
 Stochastic head (same pattern as SAND / GRU-D / transformers):
   ConsistentMCDropout(dropout_p)   <- the Keras Dropout(dropout) after the LSTM
@@ -31,6 +31,13 @@ Deviations from the benchmark:
   • use_static concatenates the STraTS demo embedding to the last hidden state,
     as STraTS's GRU/GRU-D baselines and our SAND do. The benchmark LSTM has no
     static input: use_static=false gives the exact benchmark architecture.
+  • The demo embedding is narrowed to d_static_out (default 2) instead of
+    STraTS's `dim`, and ends in a Tanh: at 256 dims with a linear output (the
+    runs before 2026-10-09) it was ~96% of the pairwise get_features distance
+    (|h| ~0.1/dim, tanh-bounded, vs |demo_emb| ~0.5/dim, max 10.7), so
+    kcenter/vendi/BADGE diversified over Age/Gender. The bound puts the demo
+    dims on the scale of h; how much Age/Gender matter is left to the
+    classifier weights, which no feature distance sees.
   • Keras `dropout` (input dropout of every LSTM layer, one mask per sequence
     shared across time steps) is a variational input mask here too, but shared
     across the four gates (Keras draws one per gate). `rec_dropout` is not
@@ -71,23 +78,25 @@ class BayesianLSTMModel(BayesianModule):
 
     Args:
         d_inp     : time-series input dim per timestep (3V; 387 for MIMIC-III).
-        d_static  : static feature dim (2 for MIMIC-III: Age, Gender).
-        dim       : LSTM units of the final layer (BiLSTMs use dim // 2 per direction).
-        depth     : total LSTM layers, (depth - 1) bidirectional + 1 unidirectional.
-        dropout_p : LSTM input dropout and MC head dropout (benchmark --dropout).
-        n_classes : number of outputs.
-        use_static: concatenate the demographics embedding to the last hidden state.
+        d_static_in : static feature dim (2 for MIMIC-III: Age, Gender).
+        d_static_out: width of the demographics embedding concatenated to h.
+        dim         : LSTM units of the final layer (BiLSTMs use dim // 2 per direction).
+        depth       : total LSTM layers, (depth - 1) bidirectional + 1 unidirectional.
+        dropout_p   : LSTM input dropout and MC head dropout (benchmark --dropout).
+        n_classes   : number of outputs.
+        use_static  : concatenate the demographics embedding to the last hidden state.
     """
 
     def __init__(
         self,
-        d_inp:      int,
-        d_static:   int,
-        dim:        int,
-        depth:      int,
-        dropout_p:  float,
-        n_classes:  int,
-        use_static: bool = True,
+        d_inp:        int,
+        d_static_in:  int,
+        d_static_out: int,
+        dim:          int,
+        depth:        int,
+        dropout_p:    float,
+        n_classes:    int,
+        use_static:   bool = True,
     ) -> None:
         super().__init__()
         assert depth >= 1
@@ -109,11 +118,12 @@ class BayesianLSTMModel(BayesianModule):
         d_fi = dim
         if use_static:
             self.demo_emb = nn.Sequential(
-                nn.Linear(d_static, dim * 2),
+                nn.Linear(d_static_in, dim * 2),
                 nn.Tanh(),
-                nn.Linear(dim * 2, dim),
+                nn.Linear(dim * 2, d_static_out),
+                nn.Tanh(),  # bounded like h = o * tanh(c), so it can't dominate distances
             )
-            d_fi += dim
+            d_fi += d_static_out
         self.d_fi = d_fi
         self.mc_dropout = ConsistentMCDropout(p=dropout_p)
         self.classifier = nn.Linear(d_fi, n_classes)
@@ -168,5 +178,5 @@ class BayesianLSTMModel(BayesianModule):
         _, (h_n, _) = self.lstm(self._input_dropout(h))
         feat = h_n[-1]                                   # (B, dim) last time step
         if self.use_static:
-            feat = torch.cat((feat, self.demo_emb(demo)), dim=-1)  # (B, 2 * dim)
+            feat = torch.cat((feat, self.demo_emb(demo)), dim=-1)  # (B, dim + d_static_out)
         return feat

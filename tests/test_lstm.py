@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader, Dataset
 sys.path.append(os.path.abspath("src"))
 
 from models.networks import build_model
-from query.query_diversity import DEVICE, get_grad_embedding
+from query.query_diversity import DEVICE, get_embeddings, get_grad_embedding
 from utils import wandb_utils
 
 T, D_INP, D_STATIC = 24, 387, 2
@@ -49,7 +49,7 @@ def test_lstm_bayesian_contract(depth, use_static, num_classes):
 
     model.eval()
     feats = model.get_features(x)
-    assert feats.shape == (6, dim * (2 if use_static else 1))
+    assert feats.shape == (6, dim + (cfg.model.d_static_out if use_static else 0))
     assert torch.equal(feats, model.get_features(x)), "backbone must be deterministic at eval"
 
     out = model(x, 10)
@@ -63,6 +63,23 @@ def test_lstm_bayesian_contract(depth, use_static, num_classes):
     )
     model(x, 1).sum().backward()
     assert all(p.grad is not None for p in model.parameters())
+
+
+def test_lstm_demo_embedding_is_bounded_and_seen_by_diversity():
+    """The demo block ends in a Tanh, so even extreme Age/Gender stay in [-1, 1]
+    like h = o * tanh(c); the diversity feature path gets all dim + d_static_out."""
+    torch.manual_seed(0)
+    cfg = _cfg()
+    model = build_model(cfg, num_classes=1).to(DEVICE).eval()
+    ts, demo = _batch(n=10)
+    demo = demo * 100.0  # far outside the z-scored range
+    loader = DataLoader(_TupleDataset(ts, demo, torch.zeros(10, 1)), batch_size=4)
+
+    feats = get_embeddings(model, loader, cpu=True)  # vendi's feature path
+    assert feats.shape == (10, cfg.model.dim + cfg.model.d_static_out)
+    assert feats.abs().max() <= 1.0
+    demo_part = feats[:, cfg.model.dim:]
+    assert not torch.allclose(demo_part, demo_part[:1]), "demo must vary across samples"
 
 
 @pytest.mark.parametrize("use_static", [True, False])
@@ -165,27 +182,35 @@ def test_lstm_grad_embedding_matches_analytic(use_true_labels):
 
 
 @pytest.mark.parametrize(
-    "data_name,model_name,task_id,use_static,expected",
+    "data_name,model_name,task_id,use_static,d_static_out,expected",
     [
-        ("mimic3_pheno", "sand", 8, None, "mimic3_pheno_t08"),       # unchanged
-        ("mimic3_pheno", "sand", 8, True, "mimic3_pheno_t08"),       # explicit default
-        ("mimic3_pheno", "lstm", 8, None, "mimic3_pheno_t08_lstm"),
-        ("mimic3_pheno", "lstm", None, None, "mimic3_pheno_lstm"),   # multi-task
-        ("mimic3_los", "lstm", None, None, "mimic3_los_lstm"),
-        ("cifar10", "resnet", None, None, "cifar10"),                # non-MIMIC untouched
+        ("mimic3_pheno", "sand", 8, None, None, "mimic3_pheno_t08"),       # unchanged
+        ("mimic3_pheno", "sand", 8, True, None, "mimic3_pheno_t08"),       # explicit default
+        ("mimic3_pheno", "lstm", 8, None, None, "mimic3_pheno_t08_lstm"),  # pre-2026-10-09 runs
+        ("mimic3_pheno", "lstm", None, None, None, "mimic3_pheno_lstm"),   # multi-task
+        ("mimic3_los", "lstm", None, None, None, "mimic3_los_lstm"),
+        ("cifar10", "resnet", None, None, None, "cifar10"),                # non-MIMIC untouched
         # time-series-only (no demographics) variants
-        ("mimic3_pheno", "sand", 8, False, "mimic3_pheno_t08_nodemo"),
-        ("mimic3_pheno", "lstm", 11, False, "mimic3_pheno_t11_lstm_nodemo"),
-        ("p12_transformer", "transformer2", None, False, "p12_transformer"),  # non-MIMIC untouched
+        ("mimic3_pheno", "sand", 8, False, None, "mimic3_pheno_t08_nodemo"),
+        ("mimic3_pheno", "lstm", 11, False, None, "mimic3_pheno_t11_lstm_nodemo"),
+        ("p12_transformer", "transformer2", None, False, None, "p12_transformer"),  # non-MIMIC untouched
+        # tanh-bounded demo embedding: always suffixed, also at the old width
+        ("mimic3_pheno", "lstm", 8, True, 2, "mimic3_pheno_t08_lstm_demo2"),
+        ("mimic3_pheno", "lstm", 11, None, 256, "mimic3_pheno_t11_lstm_demo256"),
+        ("mimic3_pheno", "lstm", 8, False, 2, "mimic3_pheno_t08_lstm_nodemo"),  # width unused
     ],
 )
-def test_wandb_data_name_tags_non_sand_mimic_models(data_name, model_name, task_id, use_static, expected):
+def test_wandb_data_name_tags_non_sand_mimic_models(
+    data_name, model_name, task_id, use_static, d_static_out, expected
+):
     data = {"name": data_name}
     if task_id is not None:
         data.update(multitask=False, task_id=task_id)
     model = {"name": model_name}
     if use_static is not None:
         model["use_static"] = use_static
+    if d_static_out is not None:
+        model["d_static_out"] = d_static_out
     cfg = OmegaConf.create({
         "data": data,
         "model": model,

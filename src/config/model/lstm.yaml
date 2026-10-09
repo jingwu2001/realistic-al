@@ -3,7 +3,10 @@ name: lstm
 #     phenotyping setting (mimic3-benchmarks README: --dim 256 --depth 1
 #     --dropout 0.3 --timestep 1.0). See models/networks/bayesian_lstm.py. ---
 d_inp: 387         # time-series input dim per timestep = 3V (the shared SAND tensor)
-d_static: 2        # static features: Age, Gender
+d_static_in: 2     # static features: Age, Gender
+d_static_out: 2    # demo embedding width concatenated to h, tanh-bounded to (-1, 1).
+                   # Runs before 2026-10-09 used 256 with no output tanh (~96% of
+                   # feature distances); config alone can't reproduce that net.
 dim: 256           # units of the final LSTM; stacked BiLSTMs use dim//2 per direction
 depth: 1           # total LSTM layers = (depth-1) BiLSTM + 1 LSTM (benchmark ihm: 2)
 use_static: True   # concat the STraTS demo embedding (as SAND does); False = exact benchmark net
