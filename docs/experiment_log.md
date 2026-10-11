@@ -109,3 +109,11 @@ launched vendi secular with just 2 iterations
 ## 2026-09-28
 launched launchers/sweep_exp_mimic3_pheno_single_task.py
 (single-/multi-stay x (100, 500) * 3 seeds)
+
+
+## 2026-10-09
+launched launchers/sweep_exp_mimic3_pheno_single_task_lstm_demo2.py
+ended before oct 11 4:33pm
+lstm, demographic (or static) dim=2, feature dimension 256+2=258
+task 8/11, acq_size 500/100
+
