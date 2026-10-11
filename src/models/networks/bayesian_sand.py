@@ -14,7 +14,9 @@ Architecture (det part):
     (position t attends to positions t-r .. t)
   DenseInterpolation over time -> (B, hid_dim * M)
   [use_static] Static/demographic embedding: Linear(D -> 2*hid) + Tanh + Linear(2*hid -> hid)
-  Concatenate -> features of dim hid_dim * M + hid_dim (hid_dim * M without use_static)
+    [d_static_out set] ... + Linear(2*hid -> d_static_out) + Tanh instead (as model=lstm)
+  Concatenate -> features of dim hid_dim * M + hid_dim (hid_dim * M without use_static,
+    hid_dim * M + d_static_out with d_static_out set)
 
 Stochastic head (same pattern as ResNet / GRU-D / transformers):
   ConsistentMCDropout(dropout_p)
@@ -31,6 +33,15 @@ Fixes applied vs. the original modeling_sand.py:
     so the backbone is deterministic at eval time (only the MC head samples).
   • binary BCE head replaced by an n_classes softmax head to match the
     framework's loss/metric plumbing (weighted_loss supported via config).
+
+Optional deviation (off by default):
+  • d_static_out narrows the demo embedding to d_static_out dims (e.g. 2) and
+    ends it in a Tanh, the same block as model=lstm (2026-10-09), so both
+    architectures can be compared with identical demographics handling.
+    None (default) keeps the STraTS hid_dim-wide linear-output embedding with
+    an unchanged parameter layout and init stream, so earlier runs reproduce.
+    In the default SAND the demo block is already only ~3-4% of the pairwise
+    get_features distance (vs ~96% for the 256-d LSTM one).
 """
 
 from __future__ import annotations
@@ -134,6 +145,8 @@ class BayesianSANDModel(BayesianModule):
         n_classes : number of output classes.
         use_static: concatenate the demographics embedding to the time-series
                     features; False = time series only (demo input ignored).
+        d_static_out: width of a tanh-bounded demographics embedding; None =
+                    the original hid_dim-wide linear-output embedding.
     """
 
     def __init__(
@@ -149,6 +162,7 @@ class BayesianSANDModel(BayesianModule):
         dropout_p:  float,
         n_classes:  int,
         use_static: bool = True,
+        d_static_out: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -176,12 +190,16 @@ class BayesianSANDModel(BayesianModule):
 
         d_fi = hid_dim * M
         if use_static:
-            self.demo_emb = nn.Sequential(
+            d_demo = hid_dim if d_static_out is None else d_static_out
+            layers = [
                 nn.Linear(d_static, hid_dim * 2),
                 nn.Tanh(),
-                nn.Linear(hid_dim * 2, hid_dim),
-            )
-            d_fi += hid_dim
+                nn.Linear(hid_dim * 2, d_demo),
+            ]
+            if d_static_out is not None:
+                layers.append(nn.Tanh())  # bounded to (-1, 1), as model=lstm
+            self.demo_emb = nn.Sequential(*layers)
+            d_fi += d_demo
         self.d_fi = d_fi
         self.mc_dropout = ConsistentMCDropout(p=dropout_p)
         self.classifier = nn.Linear(d_fi, n_classes)
@@ -231,5 +249,5 @@ class BayesianSANDModel(BayesianModule):
         ts_emb = self.dense_interpolation(h)   # (B, hid*M)
         if not self.use_static:
             return ts_emb
-        demo_emb = self.demo_emb(demo)          # (B, hid)
-        return torch.cat((ts_emb, demo_emb), dim=-1)  # (B, hid*M + hid)
+        demo_emb = self.demo_emb(demo)          # (B, hid) or (B, d_static_out)
+        return torch.cat((ts_emb, demo_emb), dim=-1)  # (B, hid*M + d_demo)

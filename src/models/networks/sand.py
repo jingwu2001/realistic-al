@@ -19,7 +19,7 @@ def sand(
 
     Expected config fields (all under ``config.model``):
       d_inp, T, d_static, hid_dim, num_heads, num_layers, r, M, dropout_p,
-      use_static (optional, default True)
+      use_static (optional, default True), d_static_out (optional, default None)
     """
     m = config.model
     return BayesianSANDModel(
@@ -34,4 +34,5 @@ def sand(
         dropout_p  = m.dropout_p,
         n_classes  = num_classes,
         use_static = getattr(m, "use_static", True),
+        d_static_out = getattr(m, "d_static_out", None),
     )
