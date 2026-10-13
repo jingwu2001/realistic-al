@@ -43,6 +43,7 @@ class TorchVisionDM(BaseDataModule):
         balanced_test_val: bool = False,
         single_stay_only: bool = False,  # unused here; only mimic3_sand (TimeSeriesDM) honors it
         pheno_task_id: Optional[int] = None,  # unused here; only mimic3_pheno (TimeSeriesDM) honors it
+        drop_classes: Optional[Sequence[int]] = None,  # unused here; only ecg5000 (TimeSeriesDM) honors it
     ):
         super().__init__(
             val_split=val_split,

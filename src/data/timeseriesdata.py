@@ -1,4 +1,5 @@
 # Adapterd from Pytorch Lighntning Bolts VisionDataModule  : https://github.com/PyTorchLightning/lightning-bolts
+from functools import partial
 from typing import Optional, Sequence, Union
 import os
 import numpy as np
@@ -51,6 +52,7 @@ class TimeSeriesDM(BaseDataModule):
         balanced_test_val: bool = False, # Forces test set and validation set to be balanced
         single_stay_only: bool = False, # mimic3_sand: keep only patients with exactly one ICU stay
         pheno_task_id: Optional[int] = None, # mimic3_pheno: single condition (None = all 25)
+        drop_classes: Optional[Sequence[int]] = None, # ecg5000: classes removed before the split
     ):
         super().__init__(
             val_split=val_split,
@@ -93,10 +95,15 @@ class TimeSeriesDM(BaseDataModule):
         self.single_stay_only = single_stay_only
         self.pheno_task_id = pheno_task_id
 
+        if drop_classes and self.dataset != "ecg5000":
+            raise NotImplementedError(f"data.drop_classes is only implemented for ecg5000, not {self.dataset}")
+
         ### IMPLEMENTATION ###
         # Novel image datasets can be added here
         if self.dataset == "ecg5000":
-            self.dataset_cls = ECG5000Dataset
+            # drop_classes removes those classes from every split (pool, val,
+            # test) BEFORE the stratified split; labels are renumbered 0..K-1
+            self.dataset_cls = partial(ECG5000Dataset, drop_classes=drop_classes)
         elif self.dataset == "p12":
             self.dataset_cls = P12Dataset
         elif self.dataset == "p12_transformer":
@@ -486,11 +493,15 @@ class TimeSeriesDM(BaseDataModule):
         # ------------------------------------------------------------------ #
         if self.dataset == "ecg5000":
             _ecg_test_size = 1000
-            _ecg_val_size  = (self.val_split if isinstance(self.val_split, int)
-                              else int(self.val_split * 5000))
             _ecg_root_tmp  = os.path.join(self.data_root, "ecg5000")
             _ecg_labels    = self.dataset_cls(root=_ecg_root_tmp, split="all").targets
             _ecg_n_total   = len(_ecg_labels)
+            _ecg_val_size  = (self.val_split if isinstance(self.val_split, int)
+                              else int(self.val_split * _ecg_n_total))
+            assert len(np.unique(_ecg_labels)) == self.num_classes, (
+                f"data.num_classes={self.num_classes} but ecg5000 has "
+                f"{len(np.unique(_ecg_labels))} classes after data.drop_classes"
+            )
             _ecg_test_idx, _ecg_val_idx, _ecg_pool_idx = self._stratified_3way_split(
                 _ecg_labels,
                 _ecg_n_total,

@@ -76,6 +76,9 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> BaseData
     pheno_task_id = None
     if cfg.data.name == "mimic3_pheno":
         pheno_task_id = pheno_single_task_id(cfg.data)
+    drop_classes = None
+    if cfg.data.get("drop_classes", None):
+        drop_classes = list(cfg.data.drop_classes)
 
     time_series_datasets = {"ecg5000", "p12", "p12_transformer", "mimic3_sand", "mimic3_los", "mimic3_pheno"}
     dm_cls = TimeSeriesDM if cfg.data.name in time_series_datasets else TorchVisionDM
@@ -106,6 +109,7 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> BaseData
         balanced_test_val=balanced_test_val,
         single_stay_only=single_stay_only,
         pheno_task_id=pheno_task_id,
+        drop_classes=drop_classes,
     )
 
     return datamodule
@@ -119,7 +123,8 @@ def label_active_dm(
     balanced_per_cls: int = 5,
 ):
     """Label the Dataset according to rules.
-    Specific for imbalanced datasets (miotcd, isic2019, isic2016 & datamodule.imbalance=True)
+    Specific for imbalanced datasets (miotcd, isic2019, isic2016, ecg5000 & datamodule.imbalance=True):
+    balanced=True labels `balanced_per_cls` samples per class, the rest of the budget randomly.
 
     Args:
         cfg (DictConfig): config from main
@@ -129,7 +134,7 @@ def label_active_dm(
         balanced_per_cls (int, optional): #samples drawn balanced per class for specific cases. Defaults to 5.
     """
     cfg.data.num_classes = cfg.data.num_classes
-    if cfg.data.name in ["isic2019", "miotcd", "isic2016"] and balanced:
+    if cfg.data.name in ["isic2019", "miotcd", "isic2016", "ecg5000"] and balanced:
         label_balance = cfg.data.num_classes * balanced_per_cls
         datamodule.train_set.label_balanced(
             n_per_class=label_balance // cfg.data.num_classes,

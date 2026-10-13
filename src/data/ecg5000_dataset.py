@@ -31,7 +31,7 @@ Why NOT:
 """
 
 import os
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -126,11 +126,15 @@ class ECG5000Dataset(Dataset):
         split:     One of ``'train'``, ``'test'``, or ``'all'``.
         transform: Optional callable applied to each sample (numpy->tensor).
                    If *None*, ZScoreNormalize is applied automatically.
+        drop_classes: Original class ids to remove entirely (e.g. ``[4]`` drops
+                   the 24 "Unclassified" beats). The remaining classes are
+                   renumbered 0..K-1 in their original order.
 
     Attributes:
         data    (np.ndarray): float32 array, shape (N, 1, 140).
         targets (np.ndarray): int array,     shape (N,).
-        classes (list[int]):  [0, 1, 2, 3, 4].
+        classes (list[int]):  [0, 1, 2, 3, 4], or 0..K-1 with drop_classes.
+        class_names (list[str]): names of the kept classes, in label order.
     """
 
     CLASS_NAMES = [
@@ -147,6 +151,7 @@ class ECG5000Dataset(Dataset):
         root: str = "/home/jing/Desktop/realistic-al/datasets/ecg5000",
         split: str = "train",
         transform: Optional[Callable] = None,
+        drop_classes: Optional[Sequence[int]] = None,
     ) -> None:
         assert split in ("train", "test", "all"), \
             f"split must be 'train', 'test', or 'all', got '{split}'"
@@ -161,7 +166,17 @@ class ECG5000Dataset(Dataset):
         d = np.load(npz_path)
         self.data    = d["X"].astype(np.float32)   # (N, 1, 140)
         self.targets = d["y"].astype(np.int64)     # (N,)
-        self.classes = list(range(self.N_CLASSES))
+
+        drop = set(int(c) for c in (drop_classes or []))
+        assert drop <= set(range(self.N_CLASSES)), f"unknown drop_classes {sorted(drop)}"
+        kept = [c for c in range(self.N_CLASSES) if c not in drop]
+        if drop:
+            keep = np.isin(self.targets, kept)
+            self.data = self.data[keep]
+            # kept is sorted, so searchsorted maps each old label to its new index
+            self.targets = np.searchsorted(kept, self.targets[keep]).astype(np.int64)
+        self.classes = list(range(len(kept)))
+        self.class_names = [self.CLASS_NAMES[c] for c in kept]
 
         # Default transform: z-score only (deterministic, safe for all splits)
         self.transform = transform if transform is not None else get_eval_transform()

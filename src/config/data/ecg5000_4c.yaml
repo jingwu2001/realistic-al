@@ -1,0 +1,12 @@
+name: ecg5000
+shape: [1, 140]
+# ECG5000 without class 4 ("Unclassified Beat", 24 of 5000 beats: too few to
+# learn or evaluate). Dropped from every split before the stratified split;
+# the remaining classes keep their labels 0-3.
+num_classes: 4
+drop_classes: [4]
+val_split: 500
+mean: [0.0]
+std: [1.0]
+transform_train: ecg_basic
+transform_test: basic
