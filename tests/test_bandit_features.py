@@ -18,7 +18,11 @@ from unittest import mock
 from torch.utils.data import DataLoader, TensorDataset
 from omegaconf import DictConfig
 
-from query.query_bandit import BanditQuerySampler, _class_distribution_entropy
+from query.query_bandit import (
+    BanditQuerySampler,
+    _class_distribution_entropy,
+    _multilabel_balance_entropy,
+)
 from query.query import QuerySampler
 from query import query_diversity
 from models.bayesian_module import BayesianModule, ConsistentMCDropout
@@ -69,10 +73,14 @@ class DummyModel(torch.nn.Module):
         return self.linear(x)
 
 
-def make_loader(n: int, has_targets: bool = False):
-    """Build a DataLoader with a dataset that has a .targets np.ndarray attribute."""
+def make_loader(n: int, has_targets: bool = False, multilabel_c: int = 0):
+    """Build a DataLoader with a dataset that has a .targets np.ndarray attribute
+    (multi-hot (n, multilabel_c) floats, as mimic3_pheno, if multilabel_c > 0)."""
     feats   = torch.randn(n, FEATURE_DIM)
-    labels  = torch.randint(0, NUM_CLASSES, (n,))
+    if multilabel_c:
+        labels = torch.randint(0, 2, (n, multilabel_c)).float()
+    else:
+        labels = torch.randint(0, NUM_CLASSES, (n,))
     dataset = TensorDataset(feats, labels)
     # Attach .targets for cls_dist computation
     dataset.targets = labels.numpy()
@@ -112,14 +120,32 @@ class TestClassDistributionEntropy:
         assert 0.0 <= val <= 1.0
 
 
+class TestMultilabelBalanceEntropy:
+    def test_half_positive_is_one(self):
+        labels = np.tile([[1.0, 0.0], [0.0, 1.0]], (5, 1))  # every label 50/50
+        assert _multilabel_balance_entropy(labels) == pytest.approx(1.0)
+
+    def test_constant_labels_are_zero(self):
+        labels = np.zeros((20, 3))
+        labels[:, 1] = 1.0  # all-negative, all-positive, all-negative
+        assert _multilabel_balance_entropy(labels) == pytest.approx(0.0, abs=1e-9)
+
+    def test_single_task_is_binary_entropy(self):
+        labels = np.array([[1.0]] * 2 + [[0.0]] * 8)  # 20% positive
+        expected = -(0.2 * np.log(0.2) + 0.8 * np.log(0.8)) / np.log(2)
+        assert _multilabel_balance_entropy(labels) == pytest.approx(expected)
+
+
 class TestBanditQuerySampler:
 
-    def _run_ranking_step(self, normalize: bool = False, use_vendi_q2: bool = False, arm: int = 0):
+    def _run_ranking_step(self, normalize: bool = False, use_vendi_q2: bool = False, arm: int = 0,
+                          multilabel_c: int = 0):
         cfg           = make_cfg(normalize, use_vendi_q2)
         model         = DummyModel()
         bandit        = MockBanditManager(arm)
         pool_loader   = make_loader(NUM_POOL)
-        labeled_loader = make_loader(NUM_LABELED)
+        labeled_loader = make_loader(NUM_LABELED, multilabel_c=multilabel_c)
+        self.labeled_targets = labeled_loader.dataset.targets
 
         sampler = BanditQuerySampler(
             cfg, model, count=2, device="cpu", bandit_manager=bandit
@@ -198,6 +224,19 @@ class TestBanditQuerySampler:
         *_, ctx = self._run_ranking_step(normalize=True)
         assert ctx.shape == (2, CONTEXT_DIM)
         assert np.all(np.isfinite(ctx))
+
+    @pytest.mark.parametrize("c", [1, 25])
+    def test_multilabel_targets(self, c):
+        """mimic3_pheno multi-hot targets (single task C=1, all 25 conditions)
+        crashed in np.bincount; cls_dist is now the mean pos/neg entropy and
+        BALD is scaled by its max, C log 2."""
+        *_, ctx = self._run_ranking_step(normalize=True, multilabel_c=c)
+        assert np.all(np.isfinite(ctx))
+        cls_dist = _multilabel_balance_entropy(self.labeled_targets)
+        assert ctx[0, 3] == pytest.approx(cls_dist)
+        assert ctx[1, 3] == pytest.approx(cls_dist)
+        top_bald = np.sort(self.bald_scores_pool)[::-1][:ACQ_SIZE].mean()
+        assert ctx[0, 0] == pytest.approx(top_bald / (c * np.log(2)), rel=1e-5)
 
     def test_uncertainty_arm_is_top_bald(self):
         indices, values, info, _ = self._run_ranking_step(arm=0)

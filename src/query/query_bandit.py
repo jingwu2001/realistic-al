@@ -25,6 +25,16 @@ def _class_distribution_entropy(labels: np.ndarray, num_classes: int) -> float:
     ent = -np.sum(p_nonzero * np.log(p_nonzero))
     return float(ent / np.log(num_classes))
 
+def _multilabel_balance_entropy(labels: np.ndarray) -> float:
+    """Multi-hot (n, C) counterpart of _class_distribution_entropy, e.g.
+    mimic3_pheno (C=1 in single-task mode): the mean over labels of the
+    positive/negative entropy divided by log 2. Returns a value in [0, 1], where
+    1 = every label 50/50 and 0 = every label all-positive or all-negative.
+    """
+    p = np.clip(labels.mean(axis=0), 1e-12, 1 - 1e-12)
+    ent = -(p * np.log(p) + (1 - p) * np.log(1 - p))
+    return float(ent.mean() / np.log(2))
+
 def _get_query_state(model: nn.Module, device):
     """Everything a query can change that later rounds depend on: the global
     RNGs (the next round's weight init, sampler and augmentation seeds draw from
@@ -173,9 +183,16 @@ class BanditQuerySampler(QuerySampler):
         # ------------------------------------------------------------------ #
         # 3. Class distribution entropy                                       #
         # ------------------------------------------------------------------ #
-        num_classes = cfg.query.bandit.get("num_classes", 10)
         labeled_targets = np.array(labeled_loader.dataset.targets)
-        cls_dist = _class_distribution_entropy(labeled_targets, num_classes)
+        if labeled_targets.ndim > 1:
+            # multi-hot targets (mimic3_pheno): np.bincount can't take them, and
+            # BALD is a sum of C Bernoulli MIs, each <= log 2
+            cls_dist = _multilabel_balance_entropy(labeled_targets)
+            bald_scale = labeled_targets.shape[1] * np.log(2)
+        else:
+            num_classes = cfg.query.bandit.get("num_classes", 10)
+            cls_dist = _class_distribution_entropy(labeled_targets, num_classes)
+            bald_scale = np.log(num_classes)
 
         # ------------------------------------------------------------------ #
         # 4. Assemble 6-D context features                                   #
@@ -196,8 +213,9 @@ class BanditQuerySampler(QuerySampler):
         ])
 
         if cfg.query.bandit.normalize_features:
-            # BALD features: scale by log(C) so they live in roughly [0, 1]
-            features_bald[:3] = features_bald[:3] / np.log(num_classes)
+            # BALD features: scale by the max BALD (log C; C log 2 multi-label)
+            # so they live in roughly [0, 1]
+            features_bald[:3] = features_bald[:3] / bald_scale
             # Vendi features: scale by set sizes  (same logic as before, extended)
             n_L  = feat_labeled.shape[0]
             n_Q  = acq_size
