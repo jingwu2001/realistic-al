@@ -102,18 +102,41 @@ def test_sand_use_static(use_static):
 
 
 def test_sand_use_static_default_is_backward_compatible():
-    """Omitting use_static (old configs) builds the original demo-concat SAND,
-    with an identical parameter layout and init stream."""
+    """Omitting use_static / d_static_out (old configs) builds the same SAND as
+    the yaml defaults: the original hid_dim demo-concat net, with an identical
+    parameter layout and init stream."""
     model_cfg = OmegaConf.load("src/config/model/sand.yaml")
-    del model_cfg["use_static"]
-    torch.manual_seed(0)
-    old = build_model(OmegaConf.create({"model": model_cfg}), num_classes=1)
-    model_cfg.use_static = True
     torch.manual_seed(0)
     new = build_model(OmegaConf.create({"model": model_cfg}), num_classes=1)
+    del model_cfg["use_static"]
+    del model_cfg["d_static_out"]
+    torch.manual_seed(0)
+    old = build_model(OmegaConf.create({"model": model_cfg}), num_classes=1)
     sd_old, sd_new = old.state_dict(), new.state_dict()
     assert list(sd_old) == list(sd_new)
     assert all(torch.equal(sd_old[k], sd_new[k]) for k in sd_old)
+    assert new.demo_emb[-1].out_features == model_cfg.hid_dim  # linear output
+
+
+def test_sand_narrow_demo_embedding_is_bounded_and_seen_by_diversity():
+    """d_static_out narrows SAND's demo block to that width and bounds it with a
+    Tanh (as model=lstm); the diversity feature path gets all hid*M + d_static_out."""
+    torch.manual_seed(0)
+    model_cfg = OmegaConf.load("src/config/model/sand.yaml")
+    model_cfg.update(d_static_out=2)
+    m = model_cfg
+    model = build_model(OmegaConf.create({"model": model_cfg}), num_classes=1).to(DEVICE).eval()
+    assert model.classifier.in_features == m.hid_dim * m.M + 2
+    ts, demo = _batch(n=10)
+    demo = demo * 100.0  # far outside the z-scored range
+    loader = DataLoader(_TupleDataset(ts, demo, torch.zeros(10, 1)), batch_size=4)
+
+    feats = get_embeddings(model, loader, cpu=True)  # vendi's feature path
+    assert feats.shape == (10, m.hid_dim * m.M + 2)
+    demo_part = feats[:, m.hid_dim * m.M:]
+    assert demo_part.abs().max() <= 1.0
+    assert not torch.allclose(demo_part, demo_part[:1]), "demo must vary across samples"
+    assert model((ts.to(DEVICE), demo.to(DEVICE)), 10).shape == (10, 10, 1)
 
 
 def test_lstm_keras_init():
@@ -198,6 +221,8 @@ def test_lstm_grad_embedding_matches_analytic(use_true_labels):
         ("mimic3_pheno", "lstm", 8, True, 2, "mimic3_pheno_t08_lstm_demo2"),
         ("mimic3_pheno", "lstm", 11, None, 256, "mimic3_pheno_t11_lstm_demo256"),
         ("mimic3_pheno", "lstm", 8, False, 2, "mimic3_pheno_t08_lstm_nodemo"),  # width unused
+        ("mimic3_pheno", "sand", 8, True, 2, "mimic3_pheno_t08_demo2"),         # narrowed SAND
+        ("mimic3_pheno", "sand", 11, False, 2, "mimic3_pheno_t11_nodemo"),      # width unused
     ],
 )
 def test_wandb_data_name_tags_non_sand_mimic_models(
