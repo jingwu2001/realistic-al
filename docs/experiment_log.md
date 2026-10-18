@@ -117,3 +117,11 @@ ended before oct 11 4:33pm
 lstm, demographic (or static) dim=2, feature dimension 256+2=258
 task 8/11, acq_size 500/100
 
+## 2026-10-11 5:16pm
+launched launchers/sweep_exp_mimic3_pheno_single_task_lstm_demo2_tune_vendi.py
+z-score normalization to avoid static features taking up too much distance
+
+## 2026-10-13 11:44pm
+launched launchers/exp_ecg5000_basic_tune_kernel.py
+ecg5000 with kernel
+
