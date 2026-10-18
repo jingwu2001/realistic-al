@@ -125,6 +125,9 @@ def label_active_dm(
     """Label the Dataset according to rules.
     Specific for imbalanced datasets (miotcd, isic2019, isic2016, ecg5000 & datamodule.imbalance=True):
     balanced=True labels `balanced_per_cls` samples per class, the rest of the budget randomly.
+    mimic3_pheno (multi-hot targets): balanced=True labels num_labelled // 2
+    positives and negatives in single-task mode, else num_labelled // C positives
+    per condition (rarest first), the rest of the budget randomly.
 
     Args:
         cfg (DictConfig): config from main
@@ -134,7 +137,21 @@ def label_active_dm(
         balanced_per_cls (int, optional): #samples drawn balanced per class for specific cases. Defaults to 5.
     """
     cfg.data.num_classes = cfg.data.num_classes
-    if cfg.data.name in ["isic2019", "miotcd", "isic2016", "ecg5000"] and balanced:
+    if cfg.data.name == "mimic3_pheno" and balanced:
+        # the generic branch below would draw only negatives in single-task
+        # mode (num_classes=1) and crash on the 25-label multi-hot targets
+        if cfg.data.num_classes == 1:
+            datamodule.train_set.label_balanced(
+                n_per_class=num_labelled // 2, num_classes=2
+            )
+        else:
+            datamodule.train_set.label_balanced_multilabel(
+                n_per_label=num_labelled // cfg.data.num_classes
+            )
+        label_random = num_labelled - datamodule.train_set.n_labelled
+        if label_random > 0:
+            datamodule.train_set.label_randomly(label_random)
+    elif cfg.data.name in ["isic2019", "miotcd", "isic2016", "ecg5000"] and balanced:
         label_balance = cfg.data.num_classes * balanced_per_cls
         datamodule.train_set.label_balanced(
             n_per_class=label_balance // cfg.data.num_classes,

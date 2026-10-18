@@ -269,6 +269,34 @@ class ActiveLearningDataset(torchdata.Dataset):
             self.label(ind)
             indices[indices > ind] -= 1
 
+    def label_balanced_multilabel(self, n_per_label: int = 1) -> None:
+        """
+        Label data-points until every label has at least `n_per_label` positives,
+        for multi-hot targets (n, C) such as mimic3_pheno.
+
+        Greedy, rarest label first: the missing positives of a label are drawn
+        at random from the pool rows positive for it, and a drawn row counts
+        towards every label it carries. Labels at most `n_per_label * C` points
+        (fewer when rows share labels), so the caller fills the rest of its budget.
+
+        Args:
+            n_per_label (int): minimum number of positives per label.
+        """
+        labels = np.asarray(self.pool.targets)  # (n_pool, C) multi-hot
+        counts = np.zeros(labels.shape[1])
+        chosen = np.zeros(len(labels), dtype=bool)
+        for c in np.argsort(labels.mean(axis=0), kind="stable"):
+            need = int(n_per_label - counts[c])
+            if need <= 0:
+                continue
+            candidates = np.where((labels[:, c] == 1) & ~chosen)[0]
+            picked = np.random.choice(candidates, size=need, replace=False)
+            chosen[picked] = True
+            counts += labels[picked].sum(axis=0)
+        # pool indices are mapped to oracle indices before any is labelled,
+        # so one call needs no index shifting (unlike label_balanced)
+        self.label(np.where(chosen)[0].tolist())
+
     def reset_labeled(self):
         """Reset the label map."""
         self.labelled = np.zeros(len(self._dataset), dtype=np.bool)

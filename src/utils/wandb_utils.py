@@ -251,6 +251,11 @@ def init_wandb(cfg: DictConfig):
         # "mimic3_pheno_t08_attnfix"; the STraTS attention used by all earlier
         # SAND runs never applied the attention weights
         data_name = f"{data_name}_attnfix"
+    if cfg.data.name.startswith("mimic3") and cfg.active.get("balanced", False):
+        # class-balanced initial labelled set (2026-10-18), e.g.
+        # "mimic3_pheno_t08_lstm_demo2_bal", so it never pools with the
+        # random-initial-set runs (same active config and seeds otherwise)
+        data_name = f"{data_name}_bal"
 
     # git commit for the session tag; fall back gracefully outside a checkout
     # (e.g. a bare copy on a cluster).

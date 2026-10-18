@@ -8,6 +8,8 @@ Plus the single-task mode (data.multitask=false: one condition, one output).
 """
 import os
 import sys
+from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -19,6 +21,7 @@ from torch.utils.data import DataLoader, TensorDataset
 # Add src to path
 sys.path.append(os.path.abspath("src"))
 
+from data.active import ActiveLearningDataset
 from data.mimic_dataset import (
     PHENO_CONDITION_NAMES,
     PHENO_NUM_CLASSES,
@@ -29,6 +32,8 @@ from data.preprocess_mimic3_sand import DEFAULT_PHENO_DEFS, build_phenotype_matr
 from models.callbacks.metrics_callback import MetricCallback, MultiLabelMetricCallback
 from query.query_diversity import DEVICE, get_grad_embedding
 from query.query_uncertainty import mutual_bald_multilabel
+from run_training import label_active_dm
+from utils import wandb_utils
 from utils.wandb_utils import _read_loop_metrics
 
 INPUT_DIM = 8
@@ -310,3 +315,98 @@ def test_multilabel_badge_grad_embedding_matches_analytic(use_true_labels, num_c
             y = (torch.sigmoid(logits) > 0.5).float().cpu()
     expected = _analytic_linear_embedding(model, data, y)
     assert torch.allclose(emb, expected, atol=1e-5)
+
+
+# --------------------------------------------------------------------------- #
+# 4. Balanced initial labelled set (active.balanced=True)                     #
+# --------------------------------------------------------------------------- #
+class _MultiHotDataset(torch.utils.data.Dataset):
+    def __init__(self, targets):
+        self.targets = targets
+
+    def __len__(self):
+        return len(self.targets)
+
+    def __getitem__(self, i):
+        return i, self.targets[i]
+
+
+def _pheno_dm(prevalence, n=4000, seed=0):
+    rng = np.random.default_rng(seed)
+    targets = (rng.random((n, len(prevalence))) < prevalence).astype(np.float32)
+    train_set = ActiveLearningDataset(_MultiHotDataset(targets), random_state=seed)
+    return SimpleNamespace(train_set=train_set, imbalance=False)
+
+
+@pytest.mark.parametrize("num_labelled", [100, 500])
+def test_balanced_single_task_is_half_positive(num_labelled):
+    """single-task num_classes=1: the generic label_balanced branch drew only
+    negatives; now half the budget is positive."""
+    np.random.seed(12345)
+    dm = _pheno_dm(np.array([0.2]))
+    cfg = OmegaConf.create({"data": {"name": "mimic3_pheno", "num_classes": 1}})
+    label_active_dm(cfg, num_labelled, True, dm)
+    y = dm.train_set.labelled_set.targets
+    assert len(y) == num_labelled
+    assert y.sum() == num_labelled // 2
+
+
+@pytest.mark.parametrize("num_labelled", [100, 500])
+def test_balanced_multilabel_meets_quota_per_condition(num_labelled):
+    """25 labels: at least num_labelled // 25 positives for every condition,
+    including ones a random draw of that size usually misses."""
+    np.random.seed(12345)
+    prevalence = np.linspace(0.03, 0.45, PHENO_NUM_CLASSES)
+    dm = _pheno_dm(prevalence)
+    cfg = OmegaConf.create(
+        {"data": {"name": "mimic3_pheno", "num_classes": PHENO_NUM_CLASSES}}
+    )
+    label_active_dm(cfg, num_labelled, True, dm)
+    y = dm.train_set.labelled_set.targets
+    assert len(y) == num_labelled
+    assert (y.sum(axis=0) >= num_labelled // PHENO_NUM_CLASSES).all()
+
+
+def test_unbalanced_pheno_stays_random():
+    """balanced=False keeps the plain random draw (paired with old runs)."""
+    dm, ref = _pheno_dm(np.array([0.2])), _pheno_dm(np.array([0.2]))
+    cfg = OmegaConf.create({"data": {"name": "mimic3_pheno", "num_classes": 1}})
+    label_active_dm(cfg, 100, False, dm)
+    ref.train_set.label_randomly(100)
+    np.testing.assert_array_equal(dm.train_set.labelled, ref.train_set.labelled)
+
+
+@pytest.mark.parametrize(
+    "task_id,model_name,balanced,expected",
+    [
+        (8, "lstm", False, "mimic3_pheno_t08_lstm_demo2"),     # unchanged
+        (8, "lstm", True, "mimic3_pheno_t08_lstm_demo2_bal"),
+        (None, "lstm", True, "mimic3_pheno_lstm_demo2_bal"),   # all 25 conditions
+        (11, "sand", True, "mimic3_pheno_t11_bal"),
+    ],
+)
+def test_wandb_data_name_tags_balanced_initial_set(task_id, model_name, balanced, expected):
+    data = {"name": "mimic3_pheno"}
+    if task_id is not None:
+        data.update(multitask=False, task_id=task_id)
+    model = {"name": model_name}
+    if model_name == "lstm":
+        model["d_static_out"] = 2
+    cfg = OmegaConf.create({
+        "data": data,
+        "model": model,
+        "query": {"name": "random"},
+        "active": {"num_labelled": 100, "acq_size": 100, "num_iter": 10, "balanced": balanced},
+        "trainer": {
+            "use_wandb": True, "dry_run": False, "seed": 12345,
+            "experiment_id": "2026-10-18_12-00-00-000000", "wandb_notes": "",
+            "wandb_project": "test", "is_test": False, "wandb_test": False,
+        },
+    })
+    hydra = SimpleNamespace(runtime=SimpleNamespace(choices={"active": "mimic3_med", "data": "mimic3_pheno"}))
+    with mock.patch.object(wandb_utils.HydraConfig, "get", return_value=hydra), \
+         mock.patch.object(wandb_utils.wandb, "init") as init:
+        wandb_utils.init_wandb(cfg)
+    kwargs = init.call_args.kwargs
+    assert kwargs["name"] == f"{expected}/random/seed-12345"
+    assert kwargs["group"] == f"{expected}/mimic3_med/random"
