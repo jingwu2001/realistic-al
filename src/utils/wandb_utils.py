@@ -237,14 +237,20 @@ def init_wandb(cfg: DictConfig):
         and cfg.model.get("use_static", True)
         and d_static_out is not None
     ):
-        # tanh-bounded LSTM demo embedding (2026-10-09), e.g.
-        # "mimic3_pheno_t08_lstm_demo2". Always suffixed, even at 256: the
-        # earlier runs (no d_static_out key) had a 256-d linear-output embedding
+        # tanh-bounded demo embedding (LSTM 2026-10-09, SAND 2026-10-11), e.g.
+        # "mimic3_pheno_t08_lstm_demo2" / "mimic3_pheno_t08_demo2". Always
+        # suffixed, even at the old width: the earlier runs (LSTM: no
+        # d_static_out key; SAND: null) had a linear-output embedding
         data_name = f"{data_name}_demo{d_static_out}"
     if cfg.data.name.startswith("mimic3") and not cfg.model.get("use_static", True):
         # time-series-only variant (no Age/Gender input), e.g.
         # "mimic3_pheno_t08_nodemo", so it never pools with the demo runs
         data_name = f"{data_name}_nodemo"
+    if cfg.data.name.startswith("mimic3") and cfg.model.get("attn_fix", False):
+        # SAND with real self-attention (2026-10-11), e.g.
+        # "mimic3_pheno_t08_attnfix"; the STraTS attention used by all earlier
+        # SAND runs never applied the attention weights
+        data_name = f"{data_name}_attnfix"
 
     # git commit for the session tag; fall back gracefully outside a checkout
     # (e.g. a bare copy on a cluster).
