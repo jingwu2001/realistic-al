@@ -34,7 +34,7 @@ from argparse import ArgumentParser
 
 from launcher import ExperimentLauncher
 
-baselines = ["random", "entropy", "bald", "badge", "kcentergreedy"]
+# baselines = ["random", "entropy", "bald", "badge", "kcentergreedy"]
 
 # (kernel, gamma, normalization); gamma is ignored by cosine
 vq2_configs = [
@@ -43,27 +43,27 @@ vq2_configs = [
     ("rbf", "median", "zscore"),
     ("rbf", "median", "none"),
     ("rbf", "dim", "zscore"),
-    ("rbf", 1.0, "l2"),
+    # ("rbf", 1.0, "l2"),
     ("cosine", None, "zscore"),
     ("cosine", None, "minmax"),
 ]
 
 config_dict = {
     "model": ["inception_time"],
-    "query": baselines + ["vendi-q2"] * len(vq2_configs),
+    "query": ["bandit", "vendi-q2"],
     "data": ["ecg5000_4c"],
     "active": [
         "ecg5000_low",
-        "ecg5000_med",
+        # "ecg5000_med",   # all 168 runs finished 2026-10-17
     ],
     "optim": ["adam"],
 }
 
 hparam_dict = {
-    "query.vendi.kernel": [None] * len(baselines) + [k for k, _, _ in vq2_configs],
-    "query.vendi.gamma": [None] * len(baselines) + [g for _, g, _ in vq2_configs],
-    "query.vendi.normalization": [None] * len(baselines) + [n for _, _, n in vq2_configs],
-    "query.vendi.use_grad": False,
+    "query.vendi.kernel": [k for k, _, _ in vq2_configs],
+    "query.vendi.gamma": [g for _, g, _ in vq2_configs],
+    "query.vendi.normalization": [n for _, _, n in vq2_configs],
+    "query.vendi.use_grad": True,
     "data.val_size": 500,
     "trainer.max_epochs": 17,
     "model.dropout_p": 0.5,
@@ -74,16 +74,19 @@ hparam_dict = {
     "trainer.deterministic": True,
     "active.balanced": [True, False],
     # placed LAST so seed is the innermost (fastest-varying) axis
-    "trainer.seed": [12345, 12346, 12347],
+    # "trainer.seed": [12345, 12346, 12347],
+    "trainer.seed": [12345, 12346, 12347, 12348, 12349, 12350],
+    "query.bandit.use_vendi_q2": True,   # False = q=1 arm, like the running feature-bandit runs
+    "query.bandit.num_classes": 4,
 }
 
 # "_vkernel/_vgamma/_vnorm", not "_kernel/_gamma/_norm": launcher.generate_name
 # strips the latter for every query except vendi/bandit (vendi-q2 included),
 # which would put all vendi-q2 configs in one folder
-naming_conv = "{data}/active-{active}/basic_model-{model}_bal-{active.balanced}_acq-{query}_vkernel-{query.vendi.kernel}_vgamma-{query.vendi.gamma}_vnorm-{query.vendi.normalization}_wloss-{model.weighted_loss}_ep-{trainer.max_epochs}"
+naming_conv = "{data}/active-{active}/basic_model-{model}_bal-{active.balanced}_acq-{query}_grad-{query.vendi.use_grad}_vkernel-{query.vendi.kernel}_vgamma-{query.vendi.gamma}_vnorm-{query.vendi.normalization}_wloss-{model.weighted_loss}_ep-{trainer.max_epochs}"
 
 joint_iteration = [
-    ["query", "query.vendi.kernel", "query.vendi.gamma", "query.vendi.normalization"],
+    ["query.vendi.kernel", "query.vendi.gamma", "query.vendi.normalization"],
 ]
 
 path_to_ex_file = "src/main.py"
