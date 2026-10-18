@@ -12,7 +12,9 @@ follows the benchmark's phenotyping LSTM (README: --dim 256 --depth 1
 STraTS SAND recipe (lr 5e-4, batch 16, clip 0.3, dropout 0.2).
   task 8  = Congestive heart failure; nonhypertensive
   task 11 = Diabetes mellitus without complication
-wandb data name: mimic3_pheno_t08_lstm / mimic3_pheno_t11_lstm.
+wandb data name: mimic3_pheno_t08_lstm / mimic3_pheno_t11_lstm (256-d demo
+embedding, the 2026-10-04 sweep); with the narrowed default model.d_static_out=2
+(2026-10-08) it is mimic3_pheno_t08_lstm_demo2 / mimic3_pheno_t11_lstm_demo2.
 """
 from argparse import ArgumentParser
 
@@ -24,13 +26,14 @@ config_dict = {
     # plain-vendi runs (~2 min/acquisition vs ~20 s for vendi-q2) don't pile
     # up at the tail
     "query": [
-        "badge",
-        "kcentergreedy",
-        "bald",
-        "entropy",
-        "random",
-        "vendi-q2",
-        "vendi",
+        # "badge",
+        # "kcentergreedy",
+        # "bald",
+        # "entropy",
+        # "random",
+        # "vendi-q2",
+        # "vendi",
+        "bandit"
     ],
     "data": ["mimic3_pheno"],
     "active": ["mimic3_med"],  # random initial labelling (num_iter=10)
@@ -42,7 +45,7 @@ config_dict = {
 #     for query: for task: for cohort: for label(=start/step): for seed
 hparam_dict = {
     "data.multitask": False,                 # single condition, scalar output
-    "data.task_id": [8, 11],                 # phenotype.npy column (0-based)
+    "data.task_id": [8],                 # phenotype.npy column (0-based)
     "data.single_stay_only": [True],  # sweep both cohorts
     "data.balanced_sampling": False,
     "model.weighted_loss": True,             # BCE pos_weight = #neg/#pos (as for SAND)
@@ -58,8 +61,8 @@ hparam_dict = {
     "trainer.deterministic": True,
     "active.num_iter": 10,                   # 10 acquisition rounds
     # (start, step) budgets, iterated jointly via joint_iteration below:
-    "active.num_labelled": [100, 500],
-    "active.acq_size": [100, 500],
+    "active.num_labelled": [500],
+    "active.acq_size": [500],
     # fixed vendi block, same as the SAND single-task runs (read by vendi and
     # vendi-q2; inert for the other methods).
     "query.vendi.kernel": "rbf",

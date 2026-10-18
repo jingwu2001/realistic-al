@@ -94,7 +94,7 @@ hparam_dict = {
     "query.vendi.normalization": "l2",
     "query.vendi.batch_size": 1,
     "query.vendi.use_grad": False,
-    "trainer.seed": [12345],                 # single-seed probe
+    "trainer.seed": [12345, 12346, 12347],                 # single-seed probe
 }
 
 # demo-{use_static} in the path, else these collide on disk with the demo runs
