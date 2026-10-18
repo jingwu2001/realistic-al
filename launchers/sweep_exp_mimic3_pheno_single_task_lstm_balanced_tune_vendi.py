@@ -79,7 +79,7 @@ hparam_dict = {
     "data.task_id": [8, 11],                 # phenotype.npy column (0-based)
     "data.single_stay_only": True,
     "data.balanced_sampling": False,
-    "active.balanced": [True, False],
+    "active.balanced": [False],
     "query.vendi.kernel": [k for k, _, _, _ in vq2_configs],
     "query.vendi.gamma": [g for _, g, _, _ in vq2_configs],
     "query.vendi.normalization": [n for _, _, n, _ in vq2_configs],

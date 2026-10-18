@@ -50,7 +50,7 @@ hparam_dict = {
     "data.task_id": [8, 11],                 # phenotype.npy column (0-based)
     "data.single_stay_only": True,
     "data.balanced_sampling": False,
-    "active.balanced": [True, False],
+    "active.balanced": [False],
     "model.use_static": False,
     "model.weighted_loss": True,             # BCE pos_weight = #neg/#pos
     "trainer.max_epochs": 50,
