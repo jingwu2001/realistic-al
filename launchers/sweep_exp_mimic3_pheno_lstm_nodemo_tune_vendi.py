@@ -1,44 +1,29 @@
 """
-Single-task phenotyping with the benchmark LSTM, TIME SERIES ONLY
-(model.use_static=false: no Age/Gender, features 256-d): vendi-q2 and the
-bandit (diversity arm = vendi-q2) over every NON-SATURATED (kernel, gamma,
-normalization, embedding), with and without a class-balanced initial labelled
-set, on task 8 (CHF) and task 11 (diabetes w/o complication).
-Recipe, tasks and active.balanced exactly as
-sweep_exp_mimic3_pheno_single_task_lstm_balanced_baselines.py (the baselines to
-compare against). The 25-condition counterpart is
-sweep_exp_mimic3_pheno_lstm_balanced_tune_vendi.py.
+25-condition multi-label phenotyping (data.multitask=true) with the benchmark
+LSTM, TIME SERIES ONLY (model.use_static=false: no Age/Gender, features
+256-d): vendi-q2 and the bandit (diversity arm = vendi-q2) over every
+NON-SATURATED (kernel, gamma, normalization, embedding), random initial
+labelled set only. Recipe exactly as
+sweep_exp_mimic3_pheno_lstm_nodemo_baselines.py (the baselines to compare
+against). The single-task (t8/t11) counterpart is
+sweep_exp_mimic3_pheno_single_task_lstm_nodemo_tune_vendi.py.
 
-Grid: {vendi-q2, bandit} x 10 kernel configs (7 feature + 3 gradient) x tasks
-{8, 11} x (start, step) in {(100, 100), (500, 500)} x active.balanced
-{True, False} x 3 seeds = 480 runs.
+Grid: {vendi-q2, bandit} x 10 kernel configs (7 feature + 3 gradient)
+x (start, step) in {(100, 100), (500, 500)} x 3 seeds = 120 runs.
 
-Which configs are kept: measured 2026-10-18/19 with
-query_diversity.kernel_diagnostics on the random-acquisition LSTM demo2 runs in
-20261009-fc59d4043 (t8/t11 x start 100/500 x 3 seeds x rounds 0/4/8 = 36
-checkpoints, L = 100 .. 4500). No TS-only LSTM checkpoint exists, so the
-TS-only embeddings were approximated by cutting the 2 demo dims from the demo2
-features / gradients (for gradients this changed nothing). Same rule as the
-ECG5000_4c sweep: kept if, in EVERY checkpoint, < 30% of labelled-pair kernel
-values are > 0.99 (all-ones collapse) and < 30% are < 0.01 (identity
-collapse), no candidates tie at the acquisition cutoff, and (rbf) the median
-kernel argument is in [0.1, 5].
+Which configs are kept: the same list as the single-task TS-only launcher,
+measured 2026-10-18/19 with query_diversity.kernel_diagnostics on SINGLE-TASK
+LSTM demo2 checkpoints (20261009-fc59d4043, demo dims cut); see that
+launcher's docstring for the criterion and the dropped configs. No 25-label
+LSTM run existed to probe. The 25-output model learns different features,
+and its gradient embedding is 25 x 256 = 6400-d ((sigmoid - y_hat) per label
+x h), so check the logged al/query/kernel_frac_near_{one,zero} of the first
+finished runs.
   feature (use_grad=false), 7 kept:
-           rbf median x {l2, minmax, zscore, none} (median arg 0.50; up to
-           24-26% of pairs < 0.01, borderline), rbf dim + zscore,
-           cosine x {zscore, none} (cosine + l2 is the same kernel as + none)
-  gradient (use_grad=true; one output -> (p - y_hat) * h), 3 kept:
+           rbf median x {l2, minmax, zscore, none}, rbf dim + zscore,
+           cosine x {zscore, none}
+  gradient (use_grad=true), 3 kept:
            rbf median + l2, cosine x {zscore, none}
-  dropped (both): rbf 1.0 (removed), rbf dim + {l2, minmax, none}
-           (-> all-ones), cosine + minmax (up to 50% / 100% of pairs > 0.99)
-  dropped (gradient only): rbf median + {minmax, zscore, none}: when the
-           model fits its labelled set (seed 12346, round 0, start 100, both
-           tasks) labelled gradients shrink (median norm .018 vs pool up to
-           3.6), median gamma ~2000 isolates ~1900 pool rows (every k^2
-           underflows) and 3400-3600 candidates tie at the cutoff -> the batch
-           is a random pick among them; l2 removes the magnitude (gamma 2.5,
-           none isolated). rbf dim + zscore: 93% of pairs > 0.99 at that
-           checkpoint.
 
 query is a cartesian axis; the four vendi keys are iterated jointly (one
 entry per kernel config).
@@ -73,10 +58,9 @@ config_dict = {
 
 # Run order is itertools.product over config_dict then hparam_dict values, with
 # the LAST multi-value key varying fastest (innermost loop):
-#     for query: for task: for balanced: for kernel cfg: for start/step: for seed
+#     for query: for kernel cfg: for start/step: for seed
 hparam_dict = {
-    "data.multitask": False,                 # single condition, scalar output
-    "data.task_id": [8, 11],                 # phenotype.npy column (0-based)
+    "data.multitask": True,                  # all 25 conditions, 25 sigmoid outputs
     "data.single_stay_only": True,
     "data.balanced_sampling": False,
     "active.balanced": [False],
@@ -87,7 +71,7 @@ hparam_dict = {
     "query.vendi.batch_size": 1,
     "query.bandit.use_vendi_q2": True,       # diversity arm = vendi-q2
     "model.use_static": False,
-    "model.weighted_loss": True,             # BCE pos_weight = #neg/#pos
+    "model.weighted_loss": True,             # per-label BCE pos_weight = #neg/#pos
     "trainer.max_epochs": 50,
     "model.dropout_p": 0.3,                  # benchmark: --dropout 0.3
     "model.learning_rate": 0.001,            # benchmark: Adam lr 1e-3
@@ -109,8 +93,9 @@ hparam_dict = {
 # "_vkernel/_vgamma/_vnorm", not "_kernel/_gamma/_norm": launcher.generate_name
 # strips the latter for every query except vendi/bandit (vendi-q2 included),
 # which would put all vendi-q2 configs in one folder. bandit becomes
-# "acq-bandit-vq2" (query.bandit.use_vendi_q2).
-naming_conv = "{data}/active-{active}/model-{model}_demo-{model.use_static}_bal-{active.balanced}_acq-{query}_grad-{query.vendi.use_grad}_vkernel-{query.vendi.kernel}_vgamma-{query.vendi.gamma}_vnorm-{query.vendi.normalization}_task-{data.task_id}_sso-{data.single_stay_only}_start-{active.num_labelled}_step-{active.acq_size}_ep-{trainer.max_epochs}"
+# "acq-bandit-vq2" (query.bandit.use_vendi_q2). No task token: every
+# single-task LSTM folder carries task-8 / task-11.
+naming_conv = "{data}/active-{active}/model-{model}_demo-{model.use_static}_bal-{active.balanced}_acq-{query}_grad-{query.vendi.use_grad}_vkernel-{query.vendi.kernel}_vgamma-{query.vendi.gamma}_vnorm-{query.vendi.normalization}_sso-{data.single_stay_only}_start-{active.num_labelled}_step-{active.acq_size}_ep-{trainer.max_epochs}"
 
 joint_iteration = [
     ["query.vendi.kernel", "query.vendi.gamma", "query.vendi.normalization",

@@ -1,27 +1,18 @@
 """
-Single-task phenotyping with the benchmark LSTM (demo2: Age/Gender narrowed to
-2 tanh dims, features 258-d): all baselines, with and without a class-balanced
-initial labelled set.
-  task 8   = Congestive heart failure; nonhypertensive
-  task 11  = Diabetes mellitus without complication
-Recipe identical to sweep_exp_mimic3_pheno_single_task_lstm_demo2.py (benchmark
-LSTM: Adam lr 1e-3, batch 8, dropout 0.3, no clipping; 50 epochs, single-stay
-cohort, weighted BCE). The 25-condition counterpart is
-sweep_exp_mimic3_pheno_lstm_balanced_baselines.py.
+25-condition multi-label phenotyping (data.multitask=true) with the benchmark
+LSTM, TIME SERIES ONLY (model.use_static=false: no Age/Gender, features
+256-d): all baselines, random initial labelled set only. Recipe identical to
+sweep_exp_mimic3_pheno_single_task_lstm_nodemo_baselines.py (benchmark LSTM:
+Adam lr 1e-3, batch 8, dropout 0.3, no clipping; 50 epochs, single-stay
+cohort, per-label weighted BCE). The vendi-q2 / bandit counterpart is
+sweep_exp_mimic3_pheno_lstm_nodemo_tune_vendi.py.
 
-Grid: 5 baselines x tasks {8, 11} x (start, step) in {(100, 100), (500, 500)}
-x active.balanced {True, False} x 3 seeds = 120 runs.
+Grid: 5 baselines x (start, step) in {(100, 100), (500, 500)} x 3 seeds
+= 30 runs.
 
-active.balanced (initial labelled set only; queries are unaffected; see
-run_training.label_active_dm):
-  True  -> num_labelled // 2 positives + num_labelled // 2 negatives
-           (pool prevalence: t8 24%, t11 19%).
-  False -> the whole budget drawn randomly from the pool (as all earlier runs).
-           These cells repeat the 2026-10-09 demo2 baselines
-           (20261009-fc59d4043): same seeds, same LSTM code -> same runs.
+active.balanced=False: the whole budget drawn randomly from the pool.
 
-wandb data name: mimic3_pheno_t08_lstm_demo2 / mimic3_pheno_t11_lstm_demo2,
-plus "_bal" for active.balanced=True.
+wandb data name: mimic3_pheno_lstm_nodemo.
 """
 from argparse import ArgumentParser
 
@@ -44,15 +35,14 @@ config_dict = {
 
 # Run order is itertools.product over config_dict then hparam_dict values, with
 # the LAST multi-value key varying fastest (innermost loop):
-#     for query: for task: for balanced: for label(=start/step): for seed
+#     for query: for label(=start/step): for seed
 hparam_dict = {
-    "data.multitask": False,                 # single condition, scalar output
-    "data.task_id": [8, 11],                 # phenotype.npy column (0-based)
+    "data.multitask": True,                  # all 25 conditions, 25 sigmoid outputs
     "data.single_stay_only": True,
     "data.balanced_sampling": False,
     "active.balanced": [False],
     "model.use_static": False,
-    "model.weighted_loss": True,             # BCE pos_weight = #neg/#pos
+    "model.weighted_loss": True,             # per-label BCE pos_weight = #neg/#pos
     "trainer.max_epochs": 50,
     "model.dropout_p": 0.3,                  # benchmark: --dropout 0.3
     "model.learning_rate": 0.001,            # benchmark: Adam lr 1e-3
@@ -71,8 +61,8 @@ hparam_dict = {
     "trainer.seed": [12345, 12346, 12347],
 }
 
-# task id and balanced in the path, else those cells collide on disk
-naming_conv = "{data}/active-{active}/model-{model}_demo-{model.use_static}_bal-{active.balanced}_acq-{query}_task-{data.task_id}_sso-{data.single_stay_only}_start-{active.num_labelled}_step-{active.acq_size}_ep-{trainer.max_epochs}"
+# no task token: every single-task LSTM folder carries task-8 / task-11
+naming_conv = "{data}/active-{active}/model-{model}_demo-{model.use_static}_bal-{active.balanced}_acq-{query}_sso-{data.single_stay_only}_start-{active.num_labelled}_step-{active.acq_size}_ep-{trainer.max_epochs}"
 
 # num_labelled and acq_size step together as (start, step) pairs
 joint_iteration = [["active.num_labelled", "active.acq_size"]]
