@@ -194,6 +194,11 @@ class BaseLauncher:
             "--notes", default="", type=str, help="Notes to attach to the wandb run"
         )
         parser.add_argument(
+            "--keep-logs", action="store_true", dest="keep_logs",
+            help="Keep every run's console log; by default only failed runs "
+                 "keep theirs",
+        )
+        parser.add_argument(
             "-j", "--jobs", default=1, type=int,
             help="Run up to N experiments concurrently from one work queue "
                  "(1 = sequential). Bounded in practice by host RAM per run.",
@@ -404,6 +409,10 @@ class BaseLauncher:
                     print(f"Logging to: {log_path}", flush=True)
                     with open(log_path, "w") as log_file:
                         call(launch_command, stdout=log_file, stderr=log_file)
+                    # only failed runs keep their console log: a finished run
+                    # has main.log (loguru), metrics and wandb
+                    if not getattr(self.launcher_args, "keep_logs", False):
+                        os.remove(log_path)
             except subprocess.CalledProcessError as e:
                 msg = f"[WARNING] run {counter}/{total} failed (exit {e.returncode}); continuing to next run."
                 if log_path is not None:
