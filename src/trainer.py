@@ -94,10 +94,12 @@ class ActiveTrainingLoop(object):
                 monitor=monitor,
                 mode=mode,
                 save_last=self.cfg.trainer.save_last,
+                save_weights_only=self.cfg.trainer.get("save_weights_only", True),
             )
         else:
             ckpt_callback = pl.callbacks.ModelCheckpoint(
-                dirpath=ckpt_path, monitor="train/acc", mode="max"
+                dirpath=ckpt_path, monitor="train/acc", mode="max",
+                save_weights_only=self.cfg.trainer.get("save_weights_only", True),
             )
         return ckpt_callback
 

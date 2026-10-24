@@ -19,6 +19,7 @@ deterministic: False
 profiler: Null
 load_best_ckpt: True
 save_last: False
+save_weights_only: True  # checkpoints without optimizer state; runs never resume training from them
 timeout: 60
 run_test: True
 use_wandb: True
