@@ -226,10 +226,10 @@ def init_wandb(cfg: DictConfig):
         task_id = pheno_single_task_id(cfg.data)
         if task_id is not None:
             data_name = f"{data_name}_t{task_id:02d}"
-    if cfg.data.name.startswith("mimic3") and cfg.model.name != "sand":
-        # SAND is the reference model on the MIMIC tasks and keeps the bare
-        # name; any other model gets its own name/group/tag, e.g.
-        # "mimic3_pheno_t08_lstm", so it never pools with the SAND runs
+    if cfg.data.name.startswith("mimic3") and cfg.model.name not in ("sand", "sand_legacy"):
+        # SAND is the reference model on the MIMIC tasks; any other model gets
+        # its own name/group/tag, e.g. "mimic3_pheno_t08_lstm", so it never
+        # pools with the SAND runs
         data_name = f"{data_name}_{cfg.model.name}"
     d_static_out = cfg.model.get("d_static_out", None)
     if (
@@ -246,10 +246,11 @@ def init_wandb(cfg: DictConfig):
         # time-series-only variant (no Age/Gender input), e.g.
         # "mimic3_pheno_t08_nodemo", so it never pools with the demo runs
         data_name = f"{data_name}_nodemo"
-    if cfg.data.name.startswith("mimic3") and cfg.model.get("attn_fix", False):
-        # SAND with real self-attention (2026-10-11), e.g.
-        # "mimic3_pheno_t08_attnfix"; the STraTS attention used by all earlier
-        # SAND runs never applied the attention weights
+    if cfg.data.name.startswith("mimic3") and cfg.model.name == "sand":
+        # SAND with real self-attention (2026-10-24), e.g.
+        # "mimic3_pheno_t08_attnfix"; the bare name belongs to the earlier SAND
+        # runs, whose STraTS attention (now model=sand_legacy) never applied
+        # the attention weights
         data_name = f"{data_name}_attnfix"
     if cfg.data.name.startswith("mimic3") and cfg.active.get("balanced", False):
         # class-balanced initial labelled set (2026-10-18), e.g.

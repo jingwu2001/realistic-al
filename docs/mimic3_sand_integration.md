@@ -129,8 +129,9 @@ iterations trains a **fresh** model and queries:
 |---|---|
 | `src/data/preprocess_mimic3_sand.py` | One-time converter: STraTS `mimic_iii.pkl` → four pre-split objects `$DATA_ROOT/mimic3_sand/{all,single_stay}/{train,test}/{X,demo,targets,subject_ids}.npy` + shared `meta.json`. Reuses STraTS's patient-grouped split (train+val vs test); train-only normalisation per cohort. |
 | `src/data/mimic_dataset.py` | `MIMIC3SandDataset(root, train, single_stay_only)` — CIFAR-style selector of the four objects; exposes `.targets` and `.groups` (patient ids) for the per-seed val carve. |
-| `src/models/networks/bayesian_sand.py` | `BayesianSANDModel` + ported SAND blocks (`MultiHeadAttention`, conv `FeedForward`, `TransformerBlock`, `DenseInterpolation`). Deterministic backbone; `ConsistentMCDropout` + linear head only (repo convention). Feature dim = `hid_dim*M + hid_dim` = 832. |
-| `src/models/networks/sand.py` | Registry entry `sand` (filename-keyed, per repo pattern). |
+| `src/models/networks/bayesian_sand.py` | `BayesianSANDModel`: `nn.TransformerEncoder` with the banded causal mask + dense interpolation (2026-10-24). Deterministic backbone; `ConsistentMCDropout` + linear head only (repo convention). Feature dim = `hid_dim*M + hid_dim` = 832. |
+| `src/models/networks/bayesian_sand_legacy.py` | `BayesianSANDLegacyModel`: the ported STraTS blocks, whose attention never applies its weights. Used by every SAND run before 2026-10-24; kept only to reproduce them. |
+| `src/models/networks/sand.py`, `sand_legacy.py` | Registry entries `sand`, `sand_legacy` (filename-keyed, per repo pattern). |
 | `src/config/model/sand.yaml` | Defaults follow the STraTS MIMIC run: hid_dim 64, 4 layers, 4 heads, r 24, M 12, dropout 0.2, lr 5e-4. |
 | `src/config/data/mimic3_sand.yaml`, `mimic3_sand_baleval.yaml` | Data configs (natural vs balanced 50/50 test+val). |
 | `src/config/active/mimic3_low.yaml`, `mimic3_med.yaml`, `mimic3_med_bal.yaml` | AL settings mirroring the p12 counterparts (med: 100 initial / acq 100 / 10 iters). |
@@ -145,7 +146,7 @@ iterations trains a **fresh** model and queries:
 - `src/run_training.py` — `mimic3_sand` added to `time_series_datasets`.
 - `src/trainer.py` — checkpoint monitor `val/auroc` + `ImbClassMetricCallback`
   for `mimic3_sand` (same as p12).
-- `src/models/networks/__init__.py` — imports for `bayesian_sand` / `sand`.
+- `src/models/networks/__init__.py` — imports for `bayesian_sand` / `sand` (+ `_legacy`).
 - `docs/handoff.md`, `docs/codebase_guide.md` — task documented.
 
 ## Decisions & deviations (and why)

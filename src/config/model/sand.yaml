@@ -1,4 +1,6 @@
 name: sand
+# Real banded causal self-attention (nn.TransformerEncoder, 2026-10-24); wandb
+# name gets _attnfix. model=sand_legacy = the STraTS attention of all earlier runs
 # --- Architecture (defaults follow the STraTS MIMIC-III SAND run) ---
 d_inp: 387         # time-series input dim per timestep = 3V (129 vars x values/obs/delta)
 T: 24              # hourly bins (first 24h of ICU stay)
@@ -12,9 +14,6 @@ use_static: True   # concat the demo (Age, Gender) embedding; False = time serie
 d_static_out: null # null = STraTS demo embedding (hid_dim wide, linear output; all runs
                    # before 2026-10-11). An int narrows it to that width + output Tanh,
                    # as model=lstm (wandb name gets _demo{N}, e.g. mimic3_pheno_t08_demo2)
-attn_fix: False    # False = STraTS attention, which never applies the attention weights
-                   # (o_t = v_t + a head/time shuffle; all runs before 2026-10-11).
-                   # True = real banded causal self-attention (wandb name gets _attnfix)
 # --- Bayesian ---
 dropout_p: 0.2
 k: 10

@@ -1,0 +1,8 @@
+# SAND with the STraTS attention, which never applies the attention weights
+# (o_t = v_t + a head/time shuffle). All SAND runs before 2026-10-24 used it under
+# model=sand; keeps their bare wandb names. Only for reproducing those runs.
+defaults:
+  - sand
+  - _self_
+
+name: sand_legacy

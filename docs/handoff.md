@@ -28,8 +28,10 @@ Two experimental tracks:
    delta + Age/Gender static; full-data normalisation stats, P12 convention).
    Run: `data=mimic3_sand` (or `mimic3_sand_baleval`) `model=sand`
    `active=mimic3_med[_bal]|mimic3_low`. Model lives in
-   `models/networks/bayesian_sand.py` (backbone deterministic, MC-dropout
-   head only; STraTS's always-on attention dropout bug fixed in the port).
+   `models/networks/bayesian_sand.py` (nn.TransformerEncoder, backbone
+   deterministic, MC-dropout head only). The STraTS port whose attention never
+   applied its weights (all SAND runs before 2026-10-24) is
+   `bayesian_sand_legacy.py`, `model=sand_legacy`.
 
 A full architecture walkthrough lives in **[codebase_guide.md](codebase_guide.md)**;
 below is the minimal map.
