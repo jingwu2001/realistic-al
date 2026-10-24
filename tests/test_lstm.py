@@ -139,6 +139,31 @@ def test_sand_narrow_demo_embedding_is_bounded_and_seen_by_diversity():
     assert model((ts.to(DEVICE), demo.to(DEVICE)), 10).shape == (10, 10, 1)
 
 
+@pytest.mark.parametrize(
+    "overrides,expected_input,expected_head",
+    [
+        ({}, 0.3, 0.3),                                   # lstm.yaml: both = dropout_p
+        ({"input_dropout_p": 0.0}, 0.0, 0.3),
+        ({"head_dropout_p": 0.5}, 0.3, 0.5),
+        ({"input_dropout_p": 0.0, "head_dropout_p": 0.5}, 0.0, 0.5),
+    ],
+)
+def test_lstm_split_dropout(overrides, expected_input, expected_head):
+    model = build_model(_cfg(**overrides), num_classes=25)
+    assert model.input_dropout_p == expected_input
+    assert model.head_dropout_p == expected_head
+    assert model.mc_dropout.p == expected_head
+    # input dropout 0: training-mode encoding no longer depends on the RNG
+    if expected_input == 0.0:
+        model.train()
+        ts, demo = _batch()
+        torch.manual_seed(1)
+        a = model._encode((ts, demo))
+        torch.manual_seed(2)
+        b = model._encode((ts, demo))
+        assert torch.allclose(a, b)
+
+
 def test_lstm_keras_init():
     model = build_model(_cfg(depth=2), num_classes=1)
     for lstm in [*model.bilstms, model.lstm]:

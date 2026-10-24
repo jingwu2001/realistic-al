@@ -166,3 +166,6 @@ lstm, 25 conditions (data.multitask=True), time series only (model.use_static=Fa
    same 10 kernel configs as the single-task nodemo sweep (7 feature + 3 gradient), not re-probed on 25 labels
 --jobs 4; wandb mimic3_pheno_lstm_nodemo; chain log experiments/activelearning/mimic3_pheno25_lstm_nodemo_chain_20261020.log
 smoke test before launch (bandit, grad rbf-median-l2, 2 rounds x 2 epochs): ok, peak RAM 7.5 GB, < 1 GB VRAM
+oct 21 8:24am: did not start, disk had 5G free (< 15G threshold); freed space (old logs, failed-run ckpts, local wandb copies)
+oct 21 9:46pm: relaunched bash launchers/run_mimic3_pheno25_lstm_nodemo.sh (80G free)
+folder mimic3_pheno/active-mimic3_med/20261021-54f0b2b6c; chain log experiments/activelearning/mimic3_pheno25_lstm_nodemo_chain_20261021.log

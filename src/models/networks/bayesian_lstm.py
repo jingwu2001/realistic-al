@@ -15,7 +15,7 @@ Architecture (det part):
   -> features of dim `dim` (+ `d_static_out` with use_static), all in (-1, 1)
 
 Stochastic head (same pattern as SAND / GRU-D / transformers):
-  ConsistentMCDropout(dropout_p)   <- the Keras Dropout(dropout) after the LSTM
+  ConsistentMCDropout(head_dropout_p)   <- the Keras Dropout(dropout) after the LSTM
   Linear(features -> n_classes)
 
 Input format expected from the dataloader (MIMIC3*Dataset):
@@ -85,6 +85,8 @@ class BayesianLSTMModel(BayesianModule):
         dropout_p   : LSTM input dropout and MC head dropout (benchmark --dropout).
         n_classes   : number of outputs.
         use_static  : concatenate the demographics embedding to the last hidden state.
+        input_dropout_p : input dropout only; None = dropout_p.
+        head_dropout_p  : MC head dropout only; None = dropout_p.
     """
 
     def __init__(
@@ -97,11 +99,15 @@ class BayesianLSTMModel(BayesianModule):
         dropout_p:    float,
         n_classes:    int,
         use_static:   bool = True,
+        input_dropout_p: float | None = None,
+        head_dropout_p:  float | None = None,
     ) -> None:
         super().__init__()
         assert depth >= 1
 
         self.dropout_p = dropout_p
+        self.input_dropout_p = dropout_p if input_dropout_p is None else input_dropout_p
+        self.head_dropout_p = dropout_p if head_dropout_p is None else head_dropout_p
         self.use_static = use_static
 
         self.bilstms = nn.ModuleList()
@@ -125,7 +131,7 @@ class BayesianLSTMModel(BayesianModule):
             )
             d_fi += d_static_out
         self.d_fi = d_fi
-        self.mc_dropout = ConsistentMCDropout(p=dropout_p)
+        self.mc_dropout = ConsistentMCDropout(p=self.head_dropout_p)
         self.classifier = nn.Linear(d_fi, n_classes)
 
     # ------------------------------------------------------------------
@@ -164,9 +170,9 @@ class BayesianLSTMModel(BayesianModule):
     def _input_dropout(self, x: torch.Tensor) -> torch.Tensor:
         """Keras LSTM(dropout=p): one input mask per sequence, reused at every
         time step. Training only, so the backbone is deterministic at eval."""
-        if not self.training or self.dropout_p == 0:
+        if not self.training or self.input_dropout_p == 0:
             return x
-        mask = F.dropout(x.new_ones(x.shape[0], 1, x.shape[2]), self.dropout_p, True)
+        mask = F.dropout(x.new_ones(x.shape[0], 1, x.shape[2]), self.input_dropout_p, True)
         return x * mask
 
     def _encode(self, x: tuple) -> torch.Tensor:

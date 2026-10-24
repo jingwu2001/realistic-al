@@ -33,24 +33,27 @@ from argparse import ArgumentParser
 from launcher import ExperimentLauncher
 
 # (kernel, gamma, normalization, use_grad); gamma is ignored by cosine
+# 2026-10-22: full 10-config sweep stopped at 6/120 (bandit feat rbf-median-l2,
+# both budgets x 3 seeds, finished); narrowed to feat rbf-dim-zscore, the
+# config picked from the single-task + ECG5000 random-start comparison
 vq2_configs = [
-    ("rbf", "median", "l2", False),
-    ("rbf", "median", "minmax", False),
-    ("rbf", "median", "zscore", False),
-    ("rbf", "median", "none", False),
+    # ("rbf", "median", "l2", False),   # bandit done 2026-10-22, vendi-q2 not run
+    # ("rbf", "median", "minmax", False),
+    # ("rbf", "median", "zscore", False),
+    # ("rbf", "median", "none", False),
     ("rbf", "dim", "zscore", False),
-    ("cosine", None, "zscore", False),
-    ("cosine", None, "none", False),
+    # ("cosine", None, "zscore", False),
+    # ("cosine", None, "none", False),
     # gradient embeddings: only the magnitude-free kernels stay healthy
-    ("rbf", "median", "l2", True),
-    ("cosine", None, "zscore", True),
-    ("cosine", None, "none", True),
+    # ("rbf", "median", "l2", True),
+    # ("cosine", None, "zscore", True),
+    # ("cosine", None, "none", True),
 ]
 
 config_dict = {
     "model": ["lstm"],
-    # bandit first: it runs a BALD pass and the vendi-q2 arm every round
-    "query": ["bandit", "vendi-q2"],
+    # vendi-q2 first, then bandit (BALD pass + vendi-q2 arm every round)
+    "query": ["vendi-q2", "bandit"],
     "data": ["mimic3_pheno"],
     "active": ["mimic3_med"],
     "optim": ["adam"],

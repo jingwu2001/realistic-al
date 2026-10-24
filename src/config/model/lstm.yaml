@@ -12,6 +12,8 @@ depth: 1           # total LSTM layers = (depth-1) BiLSTM + 1 LSTM (benchmark ih
 use_static: True   # concat the STraTS demo embedding (as SAND does); False = exact benchmark net
 # --- Bayesian ---
 dropout_p: 0.3     # benchmark --dropout: LSTM input dropout + the Dropout before Dense (= MC head)
+input_dropout_p: null  # override for the LSTM input dropout only (null = dropout_p)
+head_dropout_p: null   # override for the MC head dropout only (null = dropout_p)
 k: 10
 # --- Optimiser (benchmark: Adam lr 1e-3, beta_1 0.9, no L1/L2) ---
 weight_decay: 0.0
