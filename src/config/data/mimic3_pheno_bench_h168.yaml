@@ -1,0 +1,11 @@
+# mimic3_pheno_bench with the first 168 h (one week) of the stay instead of 48 h:
+# covers the whole stay for ~90% of stays, and keeps a fixed T for model=sand
+# (whole stays, data=mimic3_pheno_bench_full, are LSTM-only). Right-padded with
+# zeros. wandb data name mimic3_pheno_bench_h168[_tNN]. Built by
+# src/data/preprocess_mimic3_benchmark.py --hours 168.
+defaults:
+  - mimic3_pheno_bench
+  - _self_
+
+shape: [168, 76]
+mimic_dir: mimic3_benchmark/arrays_h168_first

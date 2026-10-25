@@ -61,6 +61,16 @@ Output layout (written under <out>/):
   meta.json   (variable names, static names, T, V, per-cohort split sizes,
                phenotype_conditions)
 
+Window (--hours, default 24 = the STraTS setting and the output above): the
+same stays, the same 129 channels (the variables seen in the first 24 h, in the
+same order) and the same labels, with the first --hours hours of each stay.
+STraTS stays last >= 24 h, so the 24 h tensor is never padded; with a longer
+window, hours after a stay ends (ICUSTAYS LOS, or its last event if later) are
+all-zero rows (values, mask and delta), which model=sand/lstm treat as padding.
+Fill / normalisation statistics then use real hours only; delta stays
+normalised by T, as in STraTS. Default output for --hours H != 24:
+$DATA_ROOT/mimic3_sand_hH.
+
 Usage:
   conda run -n real-al python src/data/preprocess_mimic3_sand.py \
       --strats-pkl /home/jing/Desktop/STraTS/data/processed/mimic_iii.pkl \
@@ -102,9 +112,12 @@ DEFAULT_PHENO_DEFS = os.path.join(
 LOS_BIN_EDGES = [1, 2, 3, 4, 5, 6, 7, 8, 14]
 
 
-def normalise_cohort(values_raw, obs, demo_raw, train_idx):
+def normalise_cohort(values_raw, obs, demo_raw, train_idx, real=None):
     """Mean-fill + z-normalise ``values`` and z-normalise ``demo`` using TRAIN
-    statistics only, applied to the whole cohort. Returns (values, demo)."""
+    statistics only, applied to the whole cohort. Returns (values, demo).
+
+    ``real`` (N, T) bool marks hours inside the stay (None = all, the 24 h
+    tensor); padded hours are left out of the statistics and set to 0."""
     tr = train_idx
     V = values_raw.shape[-1]
     # mean-fill: per-variable observed mean over train stays
@@ -112,10 +125,18 @@ def normalise_cohort(values_raw, obs, demo_raw, train_idx):
     fill_means = (values_raw[tr] * obs[tr]).sum(axis=(0, 1)) / obs_counts
     values = values_raw * obs + (1 - obs) * fill_means.reshape((1, 1, V))
     # z-normalise values (train mean/std, after fill)
-    means = values[tr].mean(axis=(0, 1), keepdims=True)
-    stds = values[tr].std(axis=(0, 1), keepdims=True)
+    if real is None:
+        means = values[tr].mean(axis=(0, 1), keepdims=True)
+        stds = values[tr].std(axis=(0, 1), keepdims=True)
+    else:
+        real_tr = values[tr][real[tr]]                 # (n real train hours, V)
+        means = real_tr.mean(axis=0, dtype=np.float64).reshape((1, 1, V))
+        stds = real_tr.std(axis=0, dtype=np.float64).reshape((1, 1, V))
+        del real_tr
     stds = (stds == 0) * 1 + (stds > 0) * stds
     values = ((values - means) / stds).astype(np.float32)
+    if real is not None:
+        values[~real] = 0.0
     # z-normalise demo (train mean/std)
     dmeans = demo_raw[tr].mean(axis=0, keepdims=True)
     dstds = demo_raw[tr].std(axis=0, keepdims=True)
@@ -196,9 +217,20 @@ def build_phenotype_matrix(oc, diagnoses_csv, definitions_path, all_ids):
     return phenotype, condition_names
 
 
-def save_object(out_dir, X, demo, mortality, los, sid, phenotype, icustay_ids):
+def save_object(out_dir, X_parts, demo, mortality, los, sid, phenotype, icustay_ids):
+    """X = concat(X_parts, axis=-1), written through a memmap (no full copy in RAM)."""
     os.makedirs(out_dir, exist_ok=True)
-    np.save(os.path.join(out_dir, "X.npy"), X.astype(np.float32))
+    n, T = X_parts[0].shape[:2]
+    X = np.lib.format.open_memmap(
+        os.path.join(out_dir, "X.npy"), mode="w+", dtype=np.float32,
+        shape=(n, T, sum(p.shape[-1] for p in X_parts)),
+    )
+    c = 0
+    for part in X_parts:
+        X[:, :, c:c + part.shape[-1]] = part
+        c += part.shape[-1]
+    X.flush()
+    del X
     np.save(os.path.join(out_dir, "demo.npy"), demo.astype(np.float32))
     np.save(os.path.join(out_dir, "mortality.npy"), mortality.astype(np.int64))
     np.save(os.path.join(out_dir, "los.npy"), los.astype(np.float32))
@@ -238,16 +270,24 @@ def main() -> None:
     )
     parser.add_argument(
         "--out",
-        default=os.path.join(os.environ.get("DATA_ROOT", "."), "mimic3_sand"),
-        help="Output directory (default: $DATA_ROOT/mimic3_sand)",
+        default=None,
+        help="Output directory (default: $DATA_ROOT/mimic3_sand, _hH for --hours H != 24)",
+    )
+    parser.add_argument(
+        "--hours", type=int, default=24,
+        help="window: the first HOURS hours of each stay (24 = the STraTS setting)",
     )
     args = parser.parse_args()
+    H = args.hours
+    if args.out is None:
+        name = "mimic3_sand" if H == 24 else f"mimic3_sand_h{H}"
+        args.out = os.path.join(os.environ.get("DATA_ROOT", "."), name)
 
     print(f"Loading {args.strats_pkl} ...")
     data, oc, train_ids, val_ids, test_ids = pickle.load(open(args.strats_pkl, "rb"))
 
-    # --- 1. first-24h filter + age fix (STraTS dataset.py, mimic_iii branch) ---
-    data = data.loc[(data.minute >= 0) & (data.minute <= 24 * 60)]
+    # --- 1. first-H-hours filter + age fix (STraTS dataset.py, mimic_iii branch: H = 24) ---
+    data = data.loc[(data.minute >= 0) & (data.minute <= H * 60)]
     data.loc[(data.variable == "Age") & (data.value > 200), "value"] = 91.4
 
     # STraTS train+val become the train object; STraTS test is the fixed test.
@@ -313,11 +353,16 @@ def main() -> None:
         demo_raw[row.ts_ind, static_var_to_ind[row.variable]] = row.value
 
     # --- 3. hourly binning ---
-    variables = data.variable.unique()
+    # channels = the variables seen in the first 24 h, in their 24 h order, so
+    # every window has the same 129 channels (a longer window must not add or
+    # reorder any)
+    variables = data.loc[data.minute <= 24 * 60].variable.unique()
+    data = data.loc[data.variable.isin(variables)]
     var_to_ind = {v: i for i, v in enumerate(variables)}
     V = len(variables)
     data["minute"] = data["minute"].apply(lambda x: max(1, int(np.ceil(x / 60))) - 1)
-    T = int(data.minute.max()) + 1
+    T = H
+    assert int(data.minute.max()) + 1 <= T
     print(f"V = {V} variables, T = {T} intervals")
 
     # --- 4. dense values / obs (RAW; fill+norm applied per cohort) ---
@@ -334,6 +379,15 @@ def main() -> None:
         delta[:, t, :] = (1 - obs[:, t, :]) * (1 + delta[:, t - 1, :])
     delta = delta / T
 
+    # --- padding: hours after the stay ends (LOS, or its last event if later) ---
+    last_obs = np.where(obs.any(axis=2), np.arange(T)[None, :], -1).max(axis=1)
+    n_real = np.minimum(T, np.maximum(np.ceil(los * 24 - 1e-3).astype(np.int64), last_obs + 1))
+    if (n_real < T).any():
+        real = np.arange(T)[None, :] < n_real[:, None]      # (N, T)
+        delta[~real] = 0.0
+        print(f"padding: {(n_real < T).mean():.3f} of stays shorter than {T} h")
+    else:
+        real = None  # the 24 h tensor: every stay lasts >= 24 h
     # --- 6+7. per cohort: normalise on train, noem, save train/test ---
     uniq_sid, counts = np.unique(subject_ids, return_counts=True)
     single_pat = uniq_sid[counts == 1]
@@ -351,16 +405,18 @@ def main() -> None:
         rel_test = np.where(c_is_test)[0]    # STraTS test
 
         c_values, c_demo = normalise_cohort(
-            values_raw[cidx], obs[cidx], demo_raw[cidx], rel_train
+            values_raw[cidx], obs[cidx], demo_raw[cidx], rel_train,
+            real=None if real is None else real[cidx],
         )
-        c_X = np.concatenate((c_values, obs[cidx], delta[cidx]), axis=-1).astype(np.float32)
+        c_obs, c_delta = obs[cidx], delta[cidx]
 
         for split_name, rel in (("train", rel_train), ("test", rel_test)):
             save_object(
                 os.path.join(args.out, cohort_name, split_name),
-                c_X[rel], c_demo[rel], c_labels[rel], c_los[rel], c_groups[rel],
-                c_pheno[rel], c_icustay[rel],
+                (c_values[rel], c_obs[rel], c_delta[rel]), c_demo[rel], c_labels[rel],
+                c_los[rel], c_groups[rel], c_pheno[rel], c_icustay[rel],
             )
+        del c_values, c_obs, c_delta
         meta_splits[cohort_name] = {
             "n_train": int(len(rel_train)),
             "n_test": int(len(rel_test)),
@@ -379,6 +435,8 @@ def main() -> None:
         json.dump(
             {
                 "T": T, "V": V, "D": D, "N": N, "n_patients": n_patients,
+                "window_hours": H,
+                "frac_padded": float((n_real < T).mean()),
                 "variables": list(map(str, variables)),
                 "static_varis": STATIC_VARIS,
                 "channel_layout": "concat([values, obs_mask, delta], axis=-1)",

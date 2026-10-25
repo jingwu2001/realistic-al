@@ -1,0 +1,12 @@
+# mimic3_pheno (STraTS input: 129 variables x value/mask/delta = 387 channels)
+# with the first 48 h of the stay instead of 24 h: the same stays, channels and
+# labels as mimic3_pheno; hours after a stay ends are all-zero rows (padding).
+# wandb data name mimic3_pheno_h48[_tNN]. Built by
+# src/data/preprocess_mimic3_sand.py --hours 48.
+# model.T / model.d_inp follow data.shape (run_training.setup_mimic_input_dims).
+defaults:
+  - mimic3_pheno
+  - _self_
+
+shape: [48, 387]
+mimic_dir: mimic3_sand_h48

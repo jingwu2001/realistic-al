@@ -1,0 +1,11 @@
+# mimic3_pheno_bench with the first 24 h of the stay: the benchmark's 17-variable
+# input at the STraTS window, so it compares directly with data=mimic3_pheno
+# (129 variables, 24 h). Right-padded with zeros. wandb data name
+# mimic3_pheno_bench_h24[_tNN]. Built by
+# src/data/preprocess_mimic3_benchmark.py --hours 24.
+defaults:
+  - mimic3_pheno_bench
+  - _self_
+
+shape: [24, 76]
+mimic_dir: mimic3_benchmark/arrays_h24_first
