@@ -16,6 +16,7 @@ Architecture (det part):
   num_layers x nn.TransformerEncoderLayer (post-norm, FFN width 2*hid_dim)
     with a causal band mask: position t attends to positions t-r .. t
   DenseInterpolation over time -> (B, hid_dim * M)
+    (trailing all-zero input rows = padding, zeroed before the interpolation)
   [use_static] Static/demographic embedding: Linear(D -> 2*hid) + Tanh + Linear(2*hid -> hid)
     [d_static_out set] ... + Linear(2*hid -> d_static_out) + Tanh instead (as model=lstm)
   Concatenate -> features of dim hid_dim * M + d_demo (hid_dim * M without use_static)
@@ -153,6 +154,11 @@ class BayesianSANDModel(BayesianModule):
         h = self.input_embedding(ts) + self.positional_encoding  # (B, T, hid)
         h = F.dropout(h, self.dropout_p, self.training)
         h = self.transformer(h, mask=self.mask)
+        # trailing all-zero input rows are padding (right-padded benchmark arrays):
+        # the causal mask already hides them from real hours; drop them from the
+        # interpolation too. The STraTS tensor has none (multiply by 1).
+        real = (ts.abs().amax(dim=-1) > 0).flip(1).cummax(dim=1).values.flip(1)  # (B, T)
+        h = h * real.unsqueeze(-1)
         ts_emb = (h.transpose(1, 2) @ self.interp).flatten(1)  # (B, hid*M)
         if not self.use_static:
             return ts_emb

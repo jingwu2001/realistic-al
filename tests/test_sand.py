@@ -142,3 +142,19 @@ def test_wandb_data_name_tags_sand(data_name, task_id, model_overrides, expected
     assert kwargs["group"] == f"{expected}/mimic3_med/random"
     assert expected in kwargs["tags"]
     assert kwargs["config"]["data_name"] == expected
+
+
+@torch.no_grad()
+def test_trailing_padding_excluded_from_features():
+    """Right-padded stays (benchmark arrays): the causal mask hides padded hours
+    from real ones, and the interpolation drops them, so anything that only acts
+    at padded positions (here their positional encodings) leaves the features
+    unchanged."""
+    model = _sand(use_static=False).eval()
+    ts, demo = _batch()
+    ts[:, 15:] = 0                                    # stays of 15 h, padded to T = 24
+    feats = model.get_features((ts, demo))
+    model.positional_encoding[:, 15:] += 5.0
+    assert torch.allclose(model.get_features((ts, demo)), feats, atol=1e-6)
+    model.positional_encoding[:, 14] += 5.0           # a real hour does change them
+    assert not torch.allclose(model.get_features((ts, demo)), feats, atol=1e-4)
