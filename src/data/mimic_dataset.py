@@ -44,6 +44,7 @@ pre-split.
 
 from __future__ import annotations
 
+import copy
 import os
 from typing import Optional
 
@@ -101,11 +102,13 @@ class _MIMIC3StayBase(Dataset):
             # stays stored unpadded back to back, right-padded with zeros here to
             # this object's longest stay so the default collate can stack them
             self._X = None
-            self._X_flat = np.load(os.path.join(obj_dir, "X_flat.npy"))
+            self._X_flat = np.load(os.path.join(obj_dir, "X_flat.npy"), mmap_mode="r")
             self._offsets = np.load(os.path.join(obj_dir, "offsets.npy"))
             self._T = int(np.diff(self._offsets).max())
         else:
-            self._X = np.load(os.path.join(obj_dir, "X.npy"))
+            # memory-mapped: the train/val/pool objects of a run, and parallel
+            # runs, share one page-cached copy (the 168 h x 387 tensor is ~7 GB)
+            self._X = np.load(os.path.join(obj_dir, "X.npy"), mmap_mode="r")
         self._demo = np.load(os.path.join(obj_dir, "demo.npy"))
         self.groups = np.load(
             os.path.join(obj_dir, "subject_ids.npy")
@@ -114,13 +117,23 @@ class _MIMIC3StayBase(Dataset):
     def _load(self, name: str) -> np.ndarray:
         return np.load(os.path.join(self._obj_dir, name))
 
+    def __deepcopy__(self, memo):
+        # The arrays are read-only (no ``label`` method, so ActiveLearningDataset
+        # never writes to them): share them. ActiveLearningDataset.pool /
+        # labelled_set and ActiveTrainingLoop deepcopy the dataset on every
+        # access; a real copy duplicated the whole tensor each time (~5.5 GB
+        # per copy for 168 h x 387).
+        new = copy.copy(self)
+        memo[id(self)] = new
+        return new
+
     def __len__(self) -> int:
         return len(self._demo)
 
     def _ts(self, idx: int) -> torch.Tensor:
         if self._X is not None:
-            return torch.from_numpy(self._X[idx])  # (T, C)
-        stay = self._X_flat[self._offsets[idx]:self._offsets[idx + 1]]
+            return torch.from_numpy(np.array(self._X[idx]))  # (T, C), copied out of the memmap
+        stay = np.array(self._X_flat[self._offsets[idx]:self._offsets[idx + 1]])
         ts = torch.zeros(self._T, stay.shape[1])
         ts[: len(stay)] = torch.from_numpy(stay)
         return ts

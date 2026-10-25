@@ -111,3 +111,20 @@ def test_setup_mimic_input_dims():
     other = OmegaConf.create({"data": {"name": "cifar10", "shape": [32, 32, 3]}, "model": {"T": 24}})
     setup_mimic_input_dims(other)
     assert other.model.T == 24
+
+
+def test_deepcopy_shares_arrays(tmp_path):
+    """ActiveLearningDataset.pool / labelled_set deepcopy the dataset on every
+    access: the copies must share the (read-only) arrays, not duplicate them."""
+    import copy
+    d = tmp_path / "all" / "train"
+    d.mkdir(parents=True)
+    save_stays(str(d), [np.ones((4, 3), np.float32)] * 3, 4)
+    np.save(d / "demo.npy", np.zeros((3, 2), np.float32))
+    np.save(d / "subject_ids.npy", np.array([1, 2, 3]))
+    np.save(d / "phenotype.npy", np.zeros((3, 25), np.int8))
+    ds = MIMIC3PhenotypeDataset(str(tmp_path), train=True)
+    dup = copy.deepcopy(ds)
+    assert dup is not ds and dup._X is ds._X and dup.targets is ds.targets
+    dup.some_pool_specific = 1                     # attributes stay per copy
+    assert not hasattr(ds, "some_pool_specific")
