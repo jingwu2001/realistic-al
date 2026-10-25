@@ -31,6 +31,7 @@ DATA = {  # data config -> (metric, secondary metric)
     "mimic3_pheno": ("test/macro_auroc", "test/macro_auprc"),
     "mimic3_pheno_h48": ("test/macro_auroc", "test/macro_auprc"),
     "mimic3_pheno_h168": ("test/macro_auroc", "test/macro_auprc"),
+    "mimic3_pheno_full": ("test/macro_auroc", "test/macro_auprc"),
 }
 # random query, 25-label (single-task dirs carry _task-NN and don't match); a
 # sand dir without _attnfix is the broken pre-2026-10-24 attention (sand_legacy)
