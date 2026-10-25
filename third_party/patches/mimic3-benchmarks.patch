@@ -1,0 +1,96 @@
+diff --git a/mimic3benchmark/mimic3csv.py b/mimic3benchmark/mimic3csv.py
+index 570aa46..0d1ec02 100644
+--- a/mimic3benchmark/mimic3csv.py
++++ b/mimic3benchmark/mimic3csv.py
+@@ -1,4 +1,5 @@
+ import csv
++import gzip
+ import numpy as np
+ import os
+ import pandas as pd
+@@ -7,8 +8,17 @@ from tqdm import tqdm
+ from mimic3benchmark.util import dataframe_from_csv
+ 
+ 
++def mimic3_table_path(mimic3_path, table):
++    """Path of a raw MIMIC-III table: TABLE.csv if present, else TABLE.csv.gz
++    (the PhysioNet download ships most tables gzipped)."""
++    path = os.path.join(mimic3_path, table.upper() + '.csv')
++    if not os.path.exists(path) and os.path.exists(path + '.gz'):
++        path += '.gz'
++    return path
++
++
+ def read_patients_table(mimic3_path):
+-    pats = dataframe_from_csv(os.path.join(mimic3_path, 'PATIENTS.csv'))
++    pats = dataframe_from_csv(mimic3_table_path(mimic3_path, 'PATIENTS'))
+     pats = pats[['SUBJECT_ID', 'GENDER', 'DOB', 'DOD']]
+     pats.DOB = pd.to_datetime(pats.DOB)
+     pats.DOD = pd.to_datetime(pats.DOD)
+@@ -16,7 +26,7 @@ def read_patients_table(mimic3_path):
+ 
+ 
+ def read_admissions_table(mimic3_path):
+-    admits = dataframe_from_csv(os.path.join(mimic3_path, 'ADMISSIONS.csv'))
++    admits = dataframe_from_csv(mimic3_table_path(mimic3_path, 'ADMISSIONS'))
+     admits = admits[['SUBJECT_ID', 'HADM_ID', 'ADMITTIME', 'DISCHTIME', 'DEATHTIME', 'ETHNICITY', 'DIAGNOSIS']]
+     admits.ADMITTIME = pd.to_datetime(admits.ADMITTIME)
+     admits.DISCHTIME = pd.to_datetime(admits.DISCHTIME)
+@@ -25,16 +35,16 @@ def read_admissions_table(mimic3_path):
+ 
+ 
+ def read_icustays_table(mimic3_path):
+-    stays = dataframe_from_csv(os.path.join(mimic3_path, 'ICUSTAYS.csv'))
++    stays = dataframe_from_csv(mimic3_table_path(mimic3_path, 'ICUSTAYS'))
+     stays.INTIME = pd.to_datetime(stays.INTIME)
+     stays.OUTTIME = pd.to_datetime(stays.OUTTIME)
+     return stays
+ 
+ 
+ def read_icd_diagnoses_table(mimic3_path):
+-    codes = dataframe_from_csv(os.path.join(mimic3_path, 'D_ICD_DIAGNOSES.csv'))
++    codes = dataframe_from_csv(mimic3_table_path(mimic3_path, 'D_ICD_DIAGNOSES'))
+     codes = codes[['ICD9_CODE', 'SHORT_TITLE', 'LONG_TITLE']]
+-    diagnoses = dataframe_from_csv(os.path.join(mimic3_path, 'DIAGNOSES_ICD.csv'))
++    diagnoses = dataframe_from_csv(mimic3_table_path(mimic3_path, 'DIAGNOSES_ICD'))
+     diagnoses = diagnoses.merge(codes, how='inner', left_on='ICD9_CODE', right_on='ICD9_CODE')
+     diagnoses[['SUBJECT_ID', 'HADM_ID', 'SEQ_NUM']] = diagnoses[['SUBJECT_ID', 'HADM_ID', 'SEQ_NUM']].astype(int)
+     return diagnoses
+@@ -42,7 +52,9 @@ def read_icd_diagnoses_table(mimic3_path):
+ 
+ def read_events_table_by_row(mimic3_path, table):
+     nb_rows = {'chartevents': 330712484, 'labevents': 27854056, 'outputevents': 4349219}
+-    reader = csv.DictReader(open(os.path.join(mimic3_path, table.upper() + '.csv'), 'r'))
++    path = mimic3_table_path(mimic3_path, table)
++    opener = gzip.open if path.endswith('.gz') else open
++    reader = csv.DictReader(opener(path, 'rt'))
+     for i, row in enumerate(reader):
+         if 'ICUSTAY_ID' not in row:
+             row['ICUSTAY_ID'] = ''
+diff --git a/mimic3benchmark/scripts/extract_subjects.py b/mimic3benchmark/scripts/extract_subjects.py
+index 0398dde..1c35699 100644
+--- a/mimic3benchmark/scripts/extract_subjects.py
++++ b/mimic3benchmark/scripts/extract_subjects.py
+@@ -64,7 +64,7 @@ make_phenotype_label_matrix(phenotypes, stays).to_csv(os.path.join(args.output_p
+                                                       index=False, quoting=csv.QUOTE_NONNUMERIC)
+ 
+ if args.test:
+-    pat_idx = np.random.choice(patients.shape[0], size=1000)
++    pat_idx = np.random.choice(patients.shape[0], size=1000, replace=False)
+     patients = patients.iloc[pat_idx]
+     stays = stays.merge(patients[['SUBJECT_ID']], left_on='SUBJECT_ID', right_on='SUBJECT_ID')
+     args.event_tables = [args.event_tables[0]]
+diff --git a/mimic3benchmark/scripts/validate_events.py b/mimic3benchmark/scripts/validate_events.py
+index bf8c6a8..ab2ee51 100644
+--- a/mimic3benchmark/scripts/validate_events.py
++++ b/mimic3benchmark/scripts/validate_events.py
+@@ -41,6 +41,9 @@ def main():
+         assert(len(stays_df['ICUSTAY_ID'].unique()) == len(stays_df['ICUSTAY_ID']))
+         assert(len(stays_df['HADM_ID'].unique()) == len(stays_df['HADM_ID']))
+ 
++        # a subject with no kept events (e.g. --itemids_file / --test runs) has no events.csv
++        if not os.path.exists(os.path.join(args.subjects_root_path, subject, 'events.csv')):
++            continue
+         events_df = pd.read_csv(os.path.join(args.subjects_root_path, subject, 'events.csv'), index_col=False,
+                                 dtype={'HADM_ID': str, "ICUSTAY_ID": str})
+         events_df.columns = events_df.columns.str.upper()
