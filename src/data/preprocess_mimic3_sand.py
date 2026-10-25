@@ -71,6 +71,13 @@ Fill / normalisation statistics then use real hours only; delta stays
 normalised by T, as in STraTS. Default output for --hours H != 24:
 $DATA_ROOT/mimic3_sand_hH.
 
+--hours full keeps every hour of each stay, unpadded: X_flat.npy (sum of stay
+lengths, 3V) + offsets.npy (N + 1) + lengths.npy per object, padded per sample at
+load time by the MIMIC3 datasets (model=lstm only; SAND needs a fixed T). delta
+is in days (/24, the 24 h tensor's scale), so the mask and delta channels of each
+stay's first 24 h equal mimic3_sand exactly -- checked at the end of the build.
+Default output: $DATA_ROOT/mimic3_sand_full.
+
 Usage:
   conda run -n real-al python src/data/preprocess_mimic3_sand.py \
       --strats-pkl /home/jing/Desktop/STraTS/data/processed/mimic_iii.pkl \
@@ -143,6 +150,140 @@ def normalise_cohort(values_raw, obs, demo_raw, train_idx, real=None):
     dstds = (dstds == 0) + (dstds > 0) * dstds
     demo = ((demo_raw - dmeans) / dstds).astype(np.float32)
     return values, demo
+
+
+def normalise_flat(values_raw, obs, demo_raw, train_rows, train_idx):
+    """normalise_cohort for unpadded rows (every row is a real hour): mean-fill
+    + z-normalise values on TRAIN rows, z-normalise demo on TRAIN stays."""
+    tr = train_rows
+    obs_counts = np.maximum(obs[tr].sum(axis=0), 1)
+    fill_means = (values_raw[tr] * obs[tr]).sum(axis=0) / obs_counts
+    values = values_raw * obs + (1 - obs) * fill_means[None, :]
+    means = values[tr].mean(axis=0, dtype=np.float64)
+    stds = values[tr].std(axis=0, dtype=np.float64)
+    stds = (stds == 0) * 1 + (stds > 0) * stds
+    values = ((values - means) / stds).astype(np.float32)
+    dmeans = demo_raw[train_idx].mean(axis=0, keepdims=True)
+    dstds = demo_raw[train_idx].std(axis=0, keepdims=True)
+    dstds = (dstds == 0) + (dstds > 0) * dstds
+    return values, ((demo_raw - dmeans) / dstds).astype(np.float32)
+
+
+def save_full_stay(args, values_raw, obs, delta, offsets, n_real, demo_raw, y, los,
+                   subject_ids, phenotype, icustay_ids, is_test, variables, condition_names,
+                   N, n_patients, V, D):
+    """Per cohort: normalise on train rows, save train/test as whole-stay objects."""
+    uniq_sid, counts = np.unique(subject_ids, return_counts=True)
+    cohorts = {
+        "all": np.arange(N),
+        "single_stay": np.where(np.isin(subject_ids, uniq_sid[counts == 1]))[0],
+    }
+    meta_splits = {}
+    for cohort_name, cidx in cohorts.items():
+        rows, lens = stay_rows(offsets, cidx)
+        c_offsets = np.r_[0, np.cumsum(lens)]
+        c_is_test = is_test[cidx]
+        c_values, c_demo = normalise_flat(
+            values_raw[rows], obs[rows], demo_raw[cidx],
+            np.repeat(~c_is_test, lens), np.where(~c_is_test)[0],
+        )
+        c_obs, c_delta = obs[rows], delta[rows]
+        for split_name, rel in (("train", np.where(~c_is_test)[0]), ("test", np.where(c_is_test)[0])):
+            r, l = stay_rows(c_offsets, rel)
+            g = cidx[rel]
+            save_ragged_object(
+                os.path.join(args.out, cohort_name, split_name),
+                (c_values[r], c_obs[r], c_delta[r]), l, c_demo[rel], y[g], los[g],
+                subject_ids[g], phenotype[g], icustay_ids[g],
+            )
+        del c_values, c_obs, c_delta
+        meta_splits[cohort_name] = {
+            "n_train": int((~c_is_test).sum()), "n_test": int(c_is_test.sum()),
+            "n_patients": int(np.unique(subject_ids[cidx]).size),
+            "hours_total": int(lens.sum()), "max_length": int(lens.max()),
+        }
+        print(f"[{cohort_name}] train {(~c_is_test).sum()} / test {c_is_test.sum()} stays, "
+              f"{lens.sum()} hours, longest {lens.max()} h")
+    with open(os.path.join(args.out, "meta.json"), "w") as f:
+        json.dump({
+            "T": int(n_real.max()), "V": V, "D": D, "N": N, "n_patients": n_patients,
+            "window_hours": "full",
+            "storage": "X_flat.npy + offsets.npy (unpadded whole stays)",
+            "variables": list(map(str, variables)), "static_varis": STATIC_VARIS,
+            "channel_layout": "concat([values, obs_mask, delta_days], axis=-1)",
+            "los_unit": "days", "phenotype_conditions": condition_names,
+            "split_source": "strats (train+val vs test)", "splits": meta_splits,
+        }, f, indent=2)
+    print(f"Saved 4 objects (all|single_stay x train|test) -> {args.out}")
+    ref = os.path.join(os.environ.get("DATA_ROOT", "."), "mimic3_sand")
+    if os.path.isdir(ref):
+        check_first_24h(args.out, ref)
+
+
+def ragged_hourly(ts_ind, hour, var_ind, value, n_real, V):
+    """Whole-stay hourly arrays without padding: stay i occupies rows
+    offsets[i]:offsets[i + 1]. Returns (values_raw, obs, delta_hours, offsets),
+    delta in hours since the last observation (STraTS recursion, reset per stay)."""
+    offsets = np.r_[0, np.cumsum(n_real)].astype(np.int64)
+    rows = offsets[ts_ind] + hour
+    values_raw = np.zeros((offsets[-1], V), dtype=np.float32)
+    obs = np.zeros((offsets[-1], V), dtype=np.float32)
+    values_raw[rows, var_ind] = value  # last in hour always comes last upstream
+    obs[rows, var_ind] = 1.0
+    delta = np.zeros_like(obs)
+    starts = offsets[:-1]
+    delta[starts] = obs[starts]
+    for t in range(1, int(n_real.max())):
+        idx = starts[n_real > t] + t
+        delta[idx] = (1 - obs[idx]) * (1 + delta[idx - 1])
+    return values_raw, obs, delta, offsets
+
+
+def stay_rows(offsets, idx):
+    """Row indices of stays ``idx`` in a ragged array, and their lengths."""
+    lens = offsets[idx + 1] - offsets[idx]
+    within = np.arange(lens.sum()) - np.repeat(np.cumsum(lens) - lens, lens)
+    return np.repeat(offsets[idx], lens) + within, lens
+
+
+def save_ragged_object(out_dir, X_parts, lens, demo, mortality, los, sid, phenotype, icustay_ids):
+    """Whole-stay object: X_flat = concat(X_parts, axis=-1) + offsets + lengths."""
+    os.makedirs(out_dir, exist_ok=True)
+    X = np.lib.format.open_memmap(
+        os.path.join(out_dir, "X_flat.npy"), mode="w+", dtype=np.float32,
+        shape=(X_parts[0].shape[0], sum(p.shape[-1] for p in X_parts)),
+    )
+    c = 0
+    for part in X_parts:
+        X[:, c:c + part.shape[-1]] = part
+        c += part.shape[-1]
+    X.flush()
+    del X
+    np.save(os.path.join(out_dir, "offsets.npy"), np.r_[0, np.cumsum(lens)].astype(np.int64))
+    np.save(os.path.join(out_dir, "lengths.npy"), lens.astype(np.int64))
+    np.save(os.path.join(out_dir, "demo.npy"), demo.astype(np.float32))
+    np.save(os.path.join(out_dir, "mortality.npy"), mortality.astype(np.int64))
+    np.save(os.path.join(out_dir, "los.npy"), los.astype(np.float32))
+    np.save(os.path.join(out_dir, "subject_ids.npy"), sid.astype(np.int64))
+    np.save(os.path.join(out_dir, "phenotype.npy"), phenotype.astype(np.int8))
+    np.save(os.path.join(out_dir, "icustay_ids.npy"), icustay_ids.astype(np.int64))
+
+
+def check_first_24h(out, ref):
+    """Mask + delta channels of each stay's first 24 h must equal the 24 h tensor."""
+    for cohort in ("all", "single_stay"):
+        for split in ("train", "test"):
+            d, r = os.path.join(out, cohort, split), os.path.join(ref, cohort, split)
+            X24 = np.load(os.path.join(r, "X.npy"), mmap_mode="r")
+            flat = np.load(os.path.join(d, "X_flat.npy"), mmap_mode="r")
+            offsets = np.load(os.path.join(d, "offsets.npy"))
+            V = X24.shape[-1] // 3
+            assert len(offsets) - 1 == len(X24), (cohort, split)
+            rows, _ = stay_rows(offsets, np.arange(len(X24)))
+            first = rows[(rows - np.repeat(offsets[:-1], np.diff(offsets))) < 24]
+            got = flat[first][:, V:].reshape(len(X24), 24, 2 * V)
+            assert np.array_equal(got, X24[:, :, V:]), f"first 24 h differ: {cohort}/{split}"
+    print(f"check: mask + delta of the first 24 h equal {ref}")
 
 
 def _add_hcup_ccs_2015_groups(diagnoses, definitions):
@@ -274,20 +415,21 @@ def main() -> None:
         help="Output directory (default: $DATA_ROOT/mimic3_sand, _hH for --hours H != 24)",
     )
     parser.add_argument(
-        "--hours", type=int, default=24,
-        help="window: the first HOURS hours of each stay (24 = the STraTS setting)",
+        "--hours", default="24",
+        help="window: the first HOURS hours of each stay (24 = the STraTS setting), "
+        "or 'full' for the whole stay (unpadded)",
     )
     args = parser.parse_args()
-    H = args.hours
+    H = None if args.hours == "full" else int(args.hours)
     if args.out is None:
-        name = "mimic3_sand" if H == 24 else f"mimic3_sand_h{H}"
+        name = "mimic3_sand" if H == 24 else f"mimic3_sand_{'full' if H is None else f'h{H}'}"
         args.out = os.path.join(os.environ.get("DATA_ROOT", "."), name)
 
     print(f"Loading {args.strats_pkl} ...")
     data, oc, train_ids, val_ids, test_ids = pickle.load(open(args.strats_pkl, "rb"))
 
     # --- 1. first-H-hours filter + age fix (STraTS dataset.py, mimic_iii branch: H = 24) ---
-    data = data.loc[(data.minute >= 0) & (data.minute <= H * 60)]
+    data = data.loc[(data.minute >= 0) & ((data.minute <= H * 60) if H else True)]
     data.loc[(data.variable == "Age") & (data.value > 200), "value"] = 91.4
 
     # STraTS train+val become the train object; STraTS test is the fixed test.
@@ -361,6 +503,23 @@ def main() -> None:
     var_to_ind = {v: i for i, v in enumerate(variables)}
     V = len(variables)
     data["minute"] = data["minute"].apply(lambda x: max(1, int(np.ceil(x / 60))) - 1)
+    if H is None:
+        # --- 4+5 (whole stay): unpadded rows; stay = LOS hours, or to its last event ---
+        last_hour = data.groupby("ts_ind").minute.max().reindex(range(N), fill_value=-1).to_numpy()
+        n_real = np.maximum(np.ceil(los * 24 - 1e-3).astype(np.int64), last_hour + 1)
+        values_raw, obs, delta, offsets = ragged_hourly(
+            data["ts_ind"].to_numpy(), data["minute"].to_numpy(),
+            data["variable"].map(var_to_ind).to_numpy(), data["value"].to_numpy(dtype=np.float32),
+            n_real, V,
+        )
+        del data
+        delta /= 24  # hours -> days: the 24 h tensor's scale (no fixed T here)
+        T = int(n_real.max())
+        print(f"V = {V} variables, whole stays: {offsets[-1]} hours, longest {T} h")
+        save_full_stay(args, values_raw, obs, delta, offsets, n_real, demo_raw, y, los,
+                       subject_ids, phenotype, icustay_ids, is_test, variables, condition_names,
+                       N, n_patients, V, D)
+        return
     T = H
     assert int(data.minute.max()) + 1 <= T
     print(f"V = {V} variables, T = {T} intervals")

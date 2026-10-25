@@ -1,0 +1,13 @@
+# mimic3_pheno (STraTS input: 129 variables x value/mask/delta = 387 channels)
+# with the WHOLE stay instead of the first 24 h: the same stays, channels and
+# labels, stays stored unpadded and right-padded per object at load time, so use
+# model=lstm (it packs the padding away; SAND needs a fixed T). delta is in days
+# (the 24 h tensor's scale). shape[0] = the longest stay in hours (informational:
+# model=lstm has no T). wandb data name mimic3_pheno_full[_tNN]. Built by
+# src/data/preprocess_mimic3_sand.py --hours full.
+defaults:
+  - mimic3_pheno
+  - _self_
+
+shape: [4154, 387]
+mimic_dir: mimic3_sand_full
