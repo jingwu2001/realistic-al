@@ -42,7 +42,13 @@ Deviations from the benchmark:
     shared across time steps) is a variational input mask here too, but shared
     across the four gates (Keras draws one per gate). `rec_dropout` is not
     ported: the benchmark default is 0.0 and no published command sets it.
-  • No Masking layer: the 24 hourly bins are never padded.
+  • Padding: the benchmark right-pads with zeros (pad_zeros) and skips those
+    steps with a Masking() layer. Here trailing all-zero rows are taken as
+    padding and the batch is packed (pack_padded_sequence), so the feature is
+    the state at each stay's last real hour, as with Masking(). A real hour is
+    never all-zero in the benchmark arrays (the one-hot channels are always
+    filled), and the 24-bin STraTS tensor has no padding, so its batches take
+    the unpacked path unchanged.
   • Keras initialisation is kept (glorot-uniform input kernel, orthogonal
     recurrent kernel, zero bias with forget-gate bias 1); PyTorch's default
     LSTM init is uniform(+-1/sqrt(h)) with no forget bias.
@@ -53,6 +59,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from models.bayesian_module import BayesianModule, ConsistentMCDropout
 
@@ -175,14 +182,35 @@ class BayesianLSTMModel(BayesianModule):
         mask = F.dropout(x.new_ones(x.shape[0], 1, x.shape[2]), self.input_dropout_p, True)
         return x * mask
 
+    @staticmethod
+    def _real_lengths(ts: torch.Tensor) -> torch.Tensor:
+        """Number of hours before the trailing all-zero (padding) rows, >= 1."""
+        real = ts.abs().amax(dim=-1) > 0                      # (B, T)
+        last = real.flip(1).int().argmax(dim=1)               # padding rows at the end
+        return torch.where(real.any(dim=1), ts.shape[1] - last, torch.ones_like(last))
+
     def _encode(self, x: tuple) -> torch.Tensor:
         ts, demo = x
-        # ts: (B, T, 3V)  demo: (B, D)
+        # ts: (B, T, C)  demo: (B, D); trailing all-zero rows = padding
+        lengths = self._real_lengths(ts)
+        packed = bool((lengths < ts.shape[1]).any())
+        if packed:
+            ts = ts[:, : int(lengths.max())]
+            lengths = lengths.cpu()
+
+        def run(lstm, h):
+            h = self._input_dropout(h)
+            if packed:
+                h = pack_padded_sequence(h, lengths, batch_first=True, enforce_sorted=False)
+            return lstm(h)
+
         h = ts
         for bilstm in self.bilstms:
-            h = bilstm(self._input_dropout(h))[0]       # (B, T, 2 * (dim // 2))
-        _, (h_n, _) = self.lstm(self._input_dropout(h))
-        feat = h_n[-1]                                   # (B, dim) last time step
+            h = run(bilstm, h)[0]                        # (B, T, 2 * (dim // 2))
+            if packed:
+                h = pad_packed_sequence(h, batch_first=True, total_length=ts.shape[1])[0]
+        _, (h_n, _) = run(self.lstm, h)
+        feat = h_n[-1]                                   # (B, dim) last real time step
         if self.use_static:
             feat = torch.cat((feat, self.demo_emb(demo)), dim=-1)  # (B, dim + d_static_out)
         return feat
