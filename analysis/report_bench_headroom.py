@@ -1,8 +1,10 @@
 """
-Learning-curve headroom of the random-query runs on the mimic3-benchmarks input
-(launchers/sweep_exp_mimic3_bench_{pheno,ihm}_lstm_random.py).
+Learning-curve headroom of the random-query MIMIC runs:
+the mimic3-benchmarks input (launchers/sweep_exp_mimic3_bench_{pheno,ihm}_lstm_random.py,
+sweep_exp_mimic3_pheno_sand_window_random.py) and the STraTS input at 24/48/168 h
+(data=mimic3_pheno[_h48|_h168], 25-label runs).
 
-For every (data, cohort, budget) group: the per-round test metric for each seed,
+For every (data, model, demographics, launch wave, cohort, budget) group: the per-round test metric for each seed,
 the seed mean +- sd, the gain from the first to the last round, the gain over
 the last three rounds (is the curve still rising?), and AUBC.
 
@@ -24,22 +26,35 @@ DATA = {  # data config -> (metric, secondary metric)
     "mimic3_ihm_bench": ("test/auroc", "test/auprc"),
     "mimic3_pheno_bench": ("test/macro_auroc", "test/macro_auprc"),
     "mimic3_pheno_bench_full": ("test/macro_auroc", "test/macro_auprc"),
+    "mimic3_pheno_bench_h24": ("test/macro_auroc", "test/macro_auprc"),
+    "mimic3_pheno_bench_h168": ("test/macro_auroc", "test/macro_auprc"),
+    "mimic3_pheno": ("test/macro_auroc", "test/macro_auprc"),
+    "mimic3_pheno_h48": ("test/macro_auroc", "test/macro_auprc"),
+    "mimic3_pheno_h168": ("test/macro_auroc", "test/macro_auprc"),
 }
-RUN_RE = re.compile(r"model-lstm_demo-False_acq-random_sso-(True|False)_start-(\d+)_step-(\d+)_ep-50")
+# random query, 25-label (single-task dirs carry _task-NN and don't match); a
+# sand dir without _attnfix is the broken pre-2026-10-24 attention (sand_legacy)
+RUN_RE = re.compile(
+    r"model-(lstm|sand)(_attnfix)?_demo-(True|False)(?:_bal-False)?_acq-random"
+    r"_sso-(True|False)_start-(\d+)_step-(\d+)_ep-50"
+)
 
 
 def collect() -> pd.DataFrame:
     rows = []
     for data, (metric, metric2) in DATA.items():
-        for run in sorted((ROOT / data / "active-mimic3_med").glob("*/model-lstm*/*/")):
+        for run in sorted((ROOT / data / "active-mimic3_med").glob("*/model-*/*/")):
             m = RUN_RE.fullmatch(run.parent.name)
             if not m or not (run / "test_metrics.csv").exists():
                 continue
             seed = yaml.safe_load(open(run / "loop-0" / "hparams.yaml"))["trainer"]["seed"]
             tm = pd.read_csv(run / "test_metrics.csv", index_col=0)
-            start, step = int(m.group(2)), int(m.group(3))
+            model = "sand_legacy" if m.group(1) == "sand" and not m.group(2) else m.group(1)
+            start, step = int(m.group(5)), int(m.group(6))
             for rnd, r in tm.iterrows():
-                rows.append(dict(data=data, single_stay=m.group(1) == "True", start=start,
+                rows.append(dict(data=data, model=model, demo=m.group(3) == "True",
+                                 wave=run.parent.parent.name,
+                                 single_stay=m.group(4) == "True", start=start,
                                  seed=seed, round=int(rnd), labels=start + step * int(rnd),
                                  metric=r[metric], metric2=r[metric2],
                                  finished=(run / "aubc.json").exists(), run=str(run)))
@@ -48,13 +63,16 @@ def collect() -> pd.DataFrame:
 
 def report(df: pd.DataFrame) -> str:
     out = []
-    for (data, sso, start), g in df.groupby(["data", "single_stay", "start"]):
+    for (data, model, demo, wave, sso, start), g in df.groupby(
+        ["data", "model", "demo", "wave", "single_stay", "start"]
+    ):
         metric, metric2 = DATA[data]
         cohort = "single-stay" if sso else "all stays"
         curve = g.pivot_table(index="seed", columns="labels", values="metric")
         curve2 = g.pivot_table(index="seed", columns="labels", values="metric2")
         n_done = g.groupby("seed").finished.first().sum()
-        out.append(f"\n### {data} | {cohort} | start {start}  ({n_done}/{curve.shape[0]} seeds finished)\n")
+        demo_s = "demo" if demo else "no demo"
+        out.append(f"\n### {data} | {model} | {demo_s} | {cohort} | start {start} | {wave}  ({n_done}/{curve.shape[0]} seeds finished)\n")
         out.append(f"{metric} per round (labels):\n")
         tab = curve.copy()
         tab.loc["mean"], tab.loc["sd"] = curve.mean(), curve.std()
