@@ -1,0 +1,14 @@
+# mimic3_pheno on the mimic3-benchmarks input (Harutyunyan et al.) instead of the
+# STraTS 24 h tensor: 17 variables on the benchmark's hourly grid (76 channels =
+# values + one-hot GCS/CRR + masks), first 48 h of the stay, right-padded with
+# zeros (model=lstm packs them away), the benchmark's patient split. Same labels,
+# metrics and single-task mode (data.multitask / data.task_id) as mimic3_pheno;
+# wandb data name mimic3_pheno_bench[_tNN]. Built by
+# src/data/preprocess_mimic3_benchmark.py --hours 48.
+# model.T / model.d_inp follow data.shape (run_training.setup_mimic_input_dims).
+defaults:
+  - mimic3_pheno
+  - _self_
+
+shape: [48, 76]
+mimic_dir: mimic3_benchmark/arrays_h48_first

@@ -1,0 +1,11 @@
+# mimic3_pheno_bench with the WHOLE stay, as the benchmark's phenotyping task:
+# stays stored unpadded and right-padded per object at load time, so use
+# model=lstm (it packs the padding away; SAND needs a fixed T). shape[0] = the
+# longest stay in hours. wandb data name mimic3_pheno_bench_full[_tNN]. Built by
+# src/data/preprocess_mimic3_benchmark.py --hours full.
+defaults:
+  - mimic3_pheno_bench
+  - _self_
+
+shape: [2804, 76]
+mimic_dir: mimic3_benchmark/arrays_full_first

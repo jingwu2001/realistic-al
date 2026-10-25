@@ -1,0 +1,12 @@
+# In-hospital mortality on the mimic3-benchmarks input (Harutyunyan et al.): the
+# benchmark's own task = first 48 h of ICU stays lasting >= 48 h, 17 variables on
+# its hourly grid (76 channels), its patient split. Same task plumbing as
+# mimic3_sand (binary, val/auroc); wandb data name mimic3_ihm_bench. Built by
+# src/data/preprocess_mimic3_benchmark.py --task in-hospital-mortality.
+# model.T / model.d_inp follow data.shape (run_training.setup_mimic_input_dims).
+defaults:
+  - mimic3_sand
+  - _self_
+
+shape: [48, 76]
+mimic_dir: mimic3_benchmark/arrays_ihm_h48_first

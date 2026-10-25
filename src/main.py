@@ -12,7 +12,7 @@ from omegaconf import DictConfig
 
 import utils
 from data.base_datamodule import BaseDataModule
-from run_training import get_torchvision_dm, label_active_dm, setup_pheno_task
+from run_training import get_torchvision_dm, label_active_dm, setup_mimic_input_dims, setup_pheno_task
 from trainer import ActiveTrainingLoop
 from query.bandit import BanditManager
 from utils import config_utils
@@ -31,6 +31,7 @@ def main(cfg: DictConfig):
     setup_logger()
     logger.info("Start logging")
     setup_pheno_task(cfg)
+    setup_mimic_input_dims(cfg)
     config_utils.print_config(cfg)
     logger.info("Set seed")
     utils.set_seed(cfg.trainer.seed)

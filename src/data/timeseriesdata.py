@@ -52,6 +52,7 @@ class TimeSeriesDM(BaseDataModule):
         balanced_test_val: bool = False, # Forces test set and validation set to be balanced
         single_stay_only: bool = False, # mimic3_sand: keep only patients with exactly one ICU stay
         pheno_task_id: Optional[int] = None, # mimic3_pheno: single condition (None = all 25)
+        mimic_dir: str = "mimic3_sand", # mimic3_*: object dir under data_root (mimic3_benchmark/arrays_h48_first = benchmark input)
         drop_classes: Optional[Sequence[int]] = None, # ecg5000: classes removed before the split
     ):
         super().__init__(
@@ -94,6 +95,7 @@ class TimeSeriesDM(BaseDataModule):
         self.balanced_test_val = balanced_test_val
         self.single_stay_only = single_stay_only
         self.pheno_task_id = pheno_task_id
+        self.mimic_dir = mimic_dir
 
         if drop_classes and self.dataset != "ecg5000":
             raise NotImplementedError(f"data.drop_classes is only implemented for ecg5000, not {self.dataset}")
@@ -439,7 +441,7 @@ class TimeSeriesDM(BaseDataModule):
             # preprocess_mimic3_sand.py); only the label file differs, handled by
             # self.dataset_cls (MIMIC3ICUDataset / MIMIC3LOSDataset /
             # MIMIC3PhenotypeDataset).
-            _root = os.path.join(self.data_root, "mimic3_sand")
+            _root = os.path.join(self.data_root, self.mimic_dir)
             _obj_kwargs = dict(single_stay_only=self.single_stay_only)
             if self.dataset == "mimic3_pheno":
                 _obj_kwargs["task_id"] = self.pheno_task_id

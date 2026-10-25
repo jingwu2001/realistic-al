@@ -19,6 +19,7 @@ def main(cfg: DictConfig):
     setup_logger()
     logger.info("Start logging")
     setup_pheno_task(cfg)
+    setup_mimic_input_dims(cfg)
     config_utils.print_config(cfg)
     train(cfg)
 
@@ -39,6 +40,21 @@ def setup_pheno_task(cfg: DictConfig) -> None:
         f"mimic3_pheno single-task: task_id={task_id} "
         f"({PHENO_CONDITION_NAMES[task_id]}), num_classes=1"
     )
+
+
+def setup_mimic_input_dims(cfg: DictConfig) -> None:
+    """MIMIC tasks: take the model's input size from data.shape = [T, d_inp], so
+    one model config serves both the STraTS tensor ([24, 387]) and the
+    benchmark arrays (e.g. [48, 76], data=mimic3_pheno_bench). Call at startup,
+    before the model is built. No-op for other datasets.
+    """
+    if not cfg.data.name.startswith("mimic3"):
+        return
+    T, d_inp = cfg.data.shape
+    for key, value in (("T", T), ("d_inp", d_inp)):
+        if key in cfg.model and cfg.model[key] != value:
+            logger.info(f"model.{key}: {cfg.model[key]} -> {value} (from data.shape)")
+            cfg.model[key] = value
 
 
 def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> BaseDataModule:
@@ -109,6 +125,7 @@ def get_torchvision_dm(cfg: DictConfig, active_dataset: bool = True) -> BaseData
         balanced_test_val=balanced_test_val,
         single_stay_only=single_stay_only,
         pheno_task_id=pheno_task_id,
+        mimic_dir=cfg.data.get("mimic_dir", "mimic3_sand"),
         drop_classes=drop_classes,
     )
 

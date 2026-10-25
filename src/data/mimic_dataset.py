@@ -96,7 +96,16 @@ class _MIMIC3StayBase(Dataset):
         self.single_stay_only = single_stay_only
         self._obj_dir = obj_dir
 
-        self._X = np.load(os.path.join(obj_dir, "X.npy"))
+        if os.path.exists(os.path.join(obj_dir, "X_flat.npy")):
+            # whole-stay objects (preprocess_mimic3_benchmark.py --hours full):
+            # stays stored unpadded back to back, right-padded with zeros here to
+            # this object's longest stay so the default collate can stack them
+            self._X = None
+            self._X_flat = np.load(os.path.join(obj_dir, "X_flat.npy"))
+            self._offsets = np.load(os.path.join(obj_dir, "offsets.npy"))
+            self._T = int(np.diff(self._offsets).max())
+        else:
+            self._X = np.load(os.path.join(obj_dir, "X.npy"))
         self._demo = np.load(os.path.join(obj_dir, "demo.npy"))
         self.groups = np.load(
             os.path.join(obj_dir, "subject_ids.npy")
@@ -106,10 +115,18 @@ class _MIMIC3StayBase(Dataset):
         return np.load(os.path.join(self._obj_dir, name))
 
     def __len__(self) -> int:
-        return len(self._X)
+        return len(self._demo)
+
+    def _ts(self, idx: int) -> torch.Tensor:
+        if self._X is not None:
+            return torch.from_numpy(self._X[idx])  # (T, C)
+        stay = self._X_flat[self._offsets[idx]:self._offsets[idx + 1]]
+        ts = torch.zeros(self._T, stay.shape[1])
+        ts[: len(stay)] = torch.from_numpy(stay)
+        return ts
 
     def __getitem__(self, idx: int):
-        ts = torch.from_numpy(self._X[idx])       # (24, 3V)
+        ts = self._ts(idx)                        # (24, 3V)
         demo = torch.from_numpy(self._demo[idx])  # (2,)
         label = int(self._labels[idx])
         return (ts, demo), label
@@ -128,7 +145,7 @@ class MIMIC3ICUDataset(_MIMIC3StayBase):
         super().__init__(root, train, single_stay_only)
         self.targets = self._load("mortality.npy").astype(np.int64)
         self._labels = self.targets
-        assert len(self._X) == len(self._demo) == len(self.targets) == len(self.groups)
+        assert len(self) == len(self.targets) == len(self.groups)
 
 
 class MIMIC3LOSDataset(_MIMIC3StayBase):
@@ -151,7 +168,7 @@ class MIMIC3LOSDataset(_MIMIC3StayBase):
         self.los_days = self._load("los.npy").astype(np.float32)
         self.targets = np.digitize(self.los_days, LOS_BIN_EDGES).astype(np.int64)
         self._labels = self.targets
-        assert len(self._X) == len(self._demo) == len(self.targets) == len(self.groups)
+        assert len(self) == len(self.targets) == len(self.groups)
 
 
 # Number of Harutyunyan et al. 2019 phenotype conditions (HCUP CCS 2015 groups
@@ -250,11 +267,11 @@ class MIMIC3PhenotypeDataset(_MIMIC3StayBase):
         self.targets = pheno if task_id is None else pheno[:, [task_id]]
         self.num_classes = self.targets.shape[1]
         self._labels = self.targets
-        assert len(self._X) == len(self._demo) == len(self.targets) == len(self.groups)
+        assert len(self) == len(self.targets) == len(self.groups)
 
     def __getitem__(self, idx: int):
         # Override the base scalar-int cast: the label is a (C,) float vector.
-        ts = torch.from_numpy(self._X[idx])       # (24, 3V)
+        ts = self._ts(idx)                        # (24, 3V)
         demo = torch.from_numpy(self._demo[idx])  # (2,)
         label = torch.from_numpy(self._labels[idx])  # (C,) float32, C = 25 or 1
         return (ts, demo), label
