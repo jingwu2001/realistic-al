@@ -382,7 +382,8 @@ def test_unbalanced_pheno_stays_random():
         (8, "lstm", False, "mimic3_pheno_t08_lstm_demo2"),     # unchanged
         (8, "lstm", True, "mimic3_pheno_t08_lstm_demo2_bal"),
         (None, "lstm", True, "mimic3_pheno_lstm_demo2_bal"),   # all 25 conditions
-        (11, "sand", True, "mimic3_pheno_t11_bal"),
+        (11, "sand", True, "mimic3_pheno_t11_attnfix_bal"),        # real-attention SAND
+        (11, "sand_legacy", True, "mimic3_pheno_t11_bal"),         # pre-2026-10-24 SAND
     ],
 )
 def test_wandb_data_name_tags_balanced_initial_set(task_id, model_name, balanced, expected):

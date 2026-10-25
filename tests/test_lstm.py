@@ -232,22 +232,22 @@ def test_lstm_grad_embedding_matches_analytic(use_true_labels):
 @pytest.mark.parametrize(
     "data_name,model_name,task_id,use_static,d_static_out,expected",
     [
-        ("mimic3_pheno", "sand", 8, None, None, "mimic3_pheno_t08"),       # unchanged
-        ("mimic3_pheno", "sand", 8, True, None, "mimic3_pheno_t08"),       # explicit default
+        ("mimic3_pheno", "sand_legacy", 8, None, None, "mimic3_pheno_t08"),       # unchanged
+        ("mimic3_pheno", "sand_legacy", 8, True, None, "mimic3_pheno_t08"),       # explicit default
         ("mimic3_pheno", "lstm", 8, None, None, "mimic3_pheno_t08_lstm"),  # pre-2026-10-09 runs
         ("mimic3_pheno", "lstm", None, None, None, "mimic3_pheno_lstm"),   # multi-task
         ("mimic3_los", "lstm", None, None, None, "mimic3_los_lstm"),
         ("cifar10", "resnet", None, None, None, "cifar10"),                # non-MIMIC untouched
         # time-series-only (no demographics) variants
-        ("mimic3_pheno", "sand", 8, False, None, "mimic3_pheno_t08_nodemo"),
+        ("mimic3_pheno", "sand_legacy", 8, False, None, "mimic3_pheno_t08_nodemo"),
         ("mimic3_pheno", "lstm", 11, False, None, "mimic3_pheno_t11_lstm_nodemo"),
         ("p12_transformer", "transformer2", None, False, None, "p12_transformer"),  # non-MIMIC untouched
         # tanh-bounded demo embedding: always suffixed, also at the old width
         ("mimic3_pheno", "lstm", 8, True, 2, "mimic3_pheno_t08_lstm_demo2"),
         ("mimic3_pheno", "lstm", 11, None, 256, "mimic3_pheno_t11_lstm_demo256"),
         ("mimic3_pheno", "lstm", 8, False, 2, "mimic3_pheno_t08_lstm_nodemo"),  # width unused
-        ("mimic3_pheno", "sand", 8, True, 2, "mimic3_pheno_t08_demo2"),         # narrowed SAND
-        ("mimic3_pheno", "sand", 11, False, 2, "mimic3_pheno_t11_nodemo"),      # width unused
+        ("mimic3_pheno", "sand_legacy", 8, True, 2, "mimic3_pheno_t08_demo2"),         # narrowed SAND
+        ("mimic3_pheno", "sand_legacy", 11, False, 2, "mimic3_pheno_t11_nodemo"),      # width unused
     ],
 )
 def test_wandb_data_name_tags_non_sand_mimic_models(
